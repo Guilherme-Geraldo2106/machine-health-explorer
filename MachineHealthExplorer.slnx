@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MachineHealthExplorer.Logging/MachineHealthExplorer.Logging.csproj" />
+    <Project Path="src/MachineHealthExplorer.Agent/MachineHealthExplorer.Agent.csproj" />
+    <Project Path="src/MachineHealthExplorer.Data/MachineHealthExplorer.Data.csproj" />
+    <Project Path="src/MachineHealthExplorer.Domain/MachineHealthExplorer.Domain.csproj" />
+    <Project Path="src/MachineHealthExplorer.Host/MachineHealthExplorer.Host.csproj" />
+    <Project Path="src/MachineHealthExplorer.Tools/MachineHealthExplorer.Tools.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MachineHealthExplorer.Tests/MachineHealthExplorer.Tests.csproj" />
+  </Folder>
+</Solution>

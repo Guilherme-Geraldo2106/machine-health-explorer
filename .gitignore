@@ -416,3 +416,11 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Local documentation workspace
+ia-docs-md/
+
+# Chat session JSONL logs (keep folder + .gitkeep tracked; ignore generated files)
+!src/MachineHealthExplorer.Logging/logs/
+src/MachineHealthExplorer.Logging/logs/*
+!src/MachineHealthExplorer.Logging/logs/.gitkeep
