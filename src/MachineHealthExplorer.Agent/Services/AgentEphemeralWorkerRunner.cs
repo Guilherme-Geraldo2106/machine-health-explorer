@@ -208,7 +208,7 @@ Rules:
             return next;
         }
 
-        return MergeMemoryFromWorkerJson(next, response.Content);
+        return MergeMemoryFromWorkerJson(next, AgentMemoryWorkerJsonNormalizer.PrepareMemoryWorkerJson(response.Content));
     }
 
     public async Task<string> RunEpilogueAsync(
@@ -269,6 +269,7 @@ Partial answer:
         var systemPrompt = """
 You produce ONLY the final assistant answer visible to an end user.
 Rules:
+- Put the full user-visible reply in the assistant message content field; keep any internal reasoning extremely short so it does not consume the output budget before the visible answer.
 - No chain-of-thought, no hidden reasoning, no <think> tags, no internal analysis.
 - Keep the same language as the user when it is obvious from the transcript or memory.
 - Use only facts grounded in tool evidence already present in the transcript or memory.
@@ -293,7 +294,11 @@ Write the final answer now.
             Content = userPrompt
         });
 
-        var maxOut = Math.Clamp(_options.WorkerMaxOutputTokens, 128, 1600);
+        var workerCap = Math.Clamp(_options.WorkerMaxOutputTokens, 128, 1600);
+        var maxOut = Math.Max(
+            Math.Clamp(_options.MinAssistantCompletionTokens, 96, _options.MaxOutputTokens),
+            workerCap);
+        maxOut = Math.Min(maxOut, _options.MaxOutputTokens);
         var fitted = AgentPromptBudgetGuard.FitConversationTail(
             _options,
             systemPrompt,
@@ -330,16 +335,16 @@ Write the final answer now.
         }
     }
 
-    private AgentConversationMemory MergeMemoryFromWorkerJson(AgentConversationMemory baseline, string? workerJson)
+    private AgentConversationMemory MergeMemoryFromWorkerJson(AgentConversationMemory baseline, string? normalizedJsonObject)
     {
-        if (string.IsNullOrWhiteSpace(workerJson))
+        if (string.IsNullOrWhiteSpace(normalizedJsonObject))
         {
             return baseline;
         }
 
         try
         {
-            using var document = JsonDocument.Parse(ExtractJsonObject(workerJson));
+            using var document = JsonDocument.Parse(normalizedJsonObject);
             var root = document.RootElement;
 
             var intent = ReadString(root, "currentUserIntent");
@@ -404,19 +409,6 @@ Write the final answer now.
         {
             return baseline;
         }
-    }
-
-    private static string ExtractJsonObject(string content)
-    {
-        var trimmed = content.Trim();
-        var start = trimmed.IndexOf('{');
-        var end = trimmed.LastIndexOf('}');
-        if (start >= 0 && end > start)
-        {
-            return trimmed[start..(end + 1)];
-        }
-
-        return trimmed;
     }
 
     private static string ReadString(JsonElement element, string name)
@@ -494,6 +486,16 @@ internal static class LanguageHeuristics
 {
     public static string DetectLanguage(string? latestUserInput, string? priorPreference)
     {
+        if (!string.IsNullOrWhiteSpace(latestUserInput) && HasStrongPortugueseSignal(latestUserInput))
+        {
+            return "pt";
+        }
+
+        if (!string.IsNullOrWhiteSpace(latestUserInput) && HasStrongEnglishSignal(latestUserInput))
+        {
+            return "en";
+        }
+
         if (!string.IsNullOrWhiteSpace(priorPreference))
         {
             return priorPreference.Trim();
@@ -504,20 +506,62 @@ internal static class LanguageHeuristics
             return string.Empty;
         }
 
+        return "en";
+    }
+
+    private static bool HasStrongPortugueseSignal(string latestUserInput)
+    {
         var text = latestUserInput.ToLowerInvariant();
+        var trimmed = text.TrimStart();
+
+        if (trimmed.StartsWith("qual ", StringComparison.Ordinal)
+            || trimmed.StartsWith("quais ", StringComparison.Ordinal)
+            || trimmed.StartsWith("qual?", StringComparison.Ordinal)
+            || trimmed.StartsWith("qual,", StringComparison.Ordinal)
+            || trimmed == "qual"
+            || text.Contains(" qual ", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (text.Contains('ã', StringComparison.Ordinal)
+            || text.Contains('õ', StringComparison.Ordinal)
+            || text.Contains('ç', StringComparison.Ordinal))
+        {
+            return true;
+        }
+
         var portugueseHints = new[]
         {
-            "ã", "õ", "ç", " qual ", " nao ", " não ", " voce ", " você ", " média ", " media ", " maquina ", "máquina", " porque ", "porquê"
+            "não", "nao", "voce", "você", "média", "media", "máquina", "maquina", "porque", "porquê",
+            "faixa", "falhas", "falha", "temperatura", "quantos", "quantas", "como ", " onde ", "explique", "resumo",
+            "agrup", "coluna", "dados", "análise", "analise"
         };
 
         foreach (var hint in portugueseHints)
         {
             if (text.Contains(hint, StringComparison.Ordinal))
             {
-                return "pt";
+                return true;
             }
         }
 
-        return "en";
+        return false;
+    }
+
+    private static bool HasStrongEnglishSignal(string latestUserInput)
+    {
+        var trimmed = latestUserInput.Trim().ToLowerInvariant();
+        if (trimmed.StartsWith("what ", StringComparison.Ordinal)
+            || trimmed.StartsWith("which ", StringComparison.Ordinal)
+            || trimmed.StartsWith("how ", StringComparison.Ordinal)
+            || trimmed.StartsWith("why ", StringComparison.Ordinal)
+            || trimmed.StartsWith("show ", StringComparison.Ordinal)
+            || trimmed.StartsWith("list ", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return false;
     }
 }

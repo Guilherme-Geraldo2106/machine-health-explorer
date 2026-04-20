@@ -526,4 +526,81 @@ internal static class AgentPseudoToolCallExtractor
     }
 
     private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    /// <summary>
+    /// Detects tool-call-like syntax that must not be accepted from synthesis passes where tools are disabled.
+    /// </summary>
+    public static bool ContentContainsPseudoToolCallArtifacts(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        if (content.Contains(SymmetricMarker, StringComparison.Ordinal)
+            || content.Contains(OpenAsymmetricMarker, StringComparison.Ordinal)
+            || content.Contains(CloseVariantToolCall, StringComparison.OrdinalIgnoreCase)
+            || content.Contains(CloseVariantSlash, StringComparison.OrdinalIgnoreCase)
+            || content.Contains(CloseVariantPipedSlash, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return ContainsBareCallDirective(content);
+    }
+
+    private static bool ContainsBareCallDirective(string content)
+    {
+        const string prefix = "call:";
+        var searchFrom = 0;
+        while (searchFrom < content.Length)
+        {
+            var callIdx = content.IndexOf(prefix, searchFrom, StringComparison.OrdinalIgnoreCase);
+            if (callIdx < 0)
+            {
+                break;
+            }
+
+            if (callIdx > 0 && IsIdentChar(content[callIdx - 1]))
+            {
+                searchFrom = callIdx + prefix.Length;
+                continue;
+            }
+
+            var afterPrefix = callIdx + prefix.Length;
+            while (afterPrefix < content.Length && char.IsWhiteSpace(content[afterPrefix]))
+            {
+                afterPrefix++;
+            }
+
+            var nameEnd = afterPrefix;
+            while (nameEnd < content.Length && (char.IsLetterOrDigit(content[nameEnd]) || content[nameEnd] == '_'))
+            {
+                nameEnd++;
+            }
+
+            if (nameEnd == afterPrefix)
+            {
+                searchFrom = afterPrefix + 1;
+                continue;
+            }
+
+            var braceScan = nameEnd;
+            while (braceScan < content.Length && char.IsWhiteSpace(content[braceScan]))
+            {
+                braceScan++;
+            }
+
+            if (braceScan < content.Length
+                && content[braceScan] == '{'
+                && TryReadBalancedJsonObject(content, braceScan, out _, out _))
+            {
+                return true;
+            }
+
+            searchFrom = nameEnd;
+        }
+
+        return false;
+    }
 }

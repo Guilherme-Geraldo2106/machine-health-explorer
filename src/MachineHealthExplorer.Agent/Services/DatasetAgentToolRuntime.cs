@@ -64,44 +64,46 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
     private async Task<object?> ExecuteCoreAsync(string toolName, string argumentsJson, CancellationToken cancellationToken)
         => toolName switch
         {
-            "get_schema" => await _toolService.GetSchemaAsync(cancellationToken).ConfigureAwait(false),
+            "get_schema" => BuildLeanSchemaPayload(await _toolService.GetSchemaAsync(cancellationToken).ConfigureAwait(false)),
             "describe_dataset" => await _toolService.DescribeDatasetAsync(cancellationToken).ConfigureAwait(false),
             "profile_columns" => await _toolService.ProfileColumnsAsync(
-                DeserializeArguments<ColumnProfilingRequest>(argumentsJson),
+                DeserializeToolArguments<ColumnProfilingRequest>(argumentsJson, "profile_columns"),
                 cancellationToken).ConfigureAwait(false),
             "query_rows" => await _toolService.QueryRowsAsync(
-                DeserializeArguments<QueryRequest>(argumentsJson),
-                cancellationToken).ConfigureAwait(false),
-            "find_column_extrema" => await _toolService.FindColumnExtremaRowsAsync(
-                DeserializeArguments<ColumnExtremaRequest>(argumentsJson),
+                DeserializeToolArguments<QueryRequest>(argumentsJson, "query_rows"),
                 cancellationToken).ConfigureAwait(false),
             "get_distinct_values" => await _toolService.GetDistinctValuesAsync(
-                DeserializeArguments<DistinctValuesRequest>(argumentsJson),
+                DeserializeToolArguments<DistinctValuesRequest>(argumentsJson, "get_distinct_values"),
                 cancellationToken).ConfigureAwait(false),
-            "group_and_aggregate" => await _toolService.GroupAndAggregateAsync(
-                DeserializeArguments<GroupAggregationRequest>(argumentsJson),
-                cancellationToken).ConfigureAwait(false),
-            "compare_subsets" => await _toolService.CompareSubsetsAsync(
-                DeserializeArguments<SubsetComparisonRequest>(argumentsJson),
-                cancellationToken).ConfigureAwait(false),
+            "group_and_aggregate" => await ExecuteGroupAndAggregateAsync(argumentsJson, cancellationToken).ConfigureAwait(false),
             "search_columns" => await _toolService.SearchColumnsAsync(
-                DeserializeArguments<SearchColumnsArguments>(argumentsJson).Keyword,
+                DeserializeToolArguments<SearchColumnsArguments>(argumentsJson, "search_columns").Keyword,
                 cancellationToken).ConfigureAwait(false),
-            "build_report" => await _toolService.BuildReportAsync(
-                DeserializeArguments<ReportRequest>(argumentsJson),
-                cancellationToken).ConfigureAwait(false),
-            "get_failure_analysis" => await _toolService.GetFailureAnalysisAsync(cancellationToken).ConfigureAwait(false),
-            "compare_failure_cohorts" => await _toolService.CompareFailureCohortsAsync(cancellationToken).ConfigureAwait(false),
-            "get_operating_condition_summary" => await _toolService.GetOperatingConditionSummaryAsync(
-                DeserializeArguments<OperatingConditionSummaryArguments>(argumentsJson).Filter,
-                cancellationToken).ConfigureAwait(false),
-            "build_executive_report" => await _toolService.BuildExecutiveReportAsync(cancellationToken).ConfigureAwait(false),
-            "get_analysis_examples" => await _toolService.GetAnalysisExamplesAsync(cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Unknown tool '{toolName}'.")
         };
 
-    private static T DeserializeArguments<T>(string argumentsJson)
-        => AgentJsonSerializer.Deserialize<T>(NormalizeArguments(argumentsJson));
+    private async Task<GroupAggregationResult> ExecuteGroupAndAggregateAsync(string argumentsJson, CancellationToken cancellationToken)
+    {
+        var request = DeserializeToolArguments<GroupAggregationRequest>(argumentsJson, "group_and_aggregate");
+        if (request.Aggregations.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "group_and_aggregate requires a non-empty 'aggregations' array (each item needs 'alias' and 'function').");
+        }
+
+        return await _toolService.GroupAndAggregateAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static T DeserializeToolArguments<T>(string argumentsJson, string toolName)
+    {
+        if (!AgentToolJsonDeserializer.TryDeserialize<T>(NormalizeArguments(argumentsJson), out var parsed, out var error)
+            || parsed is null)
+        {
+            throw new InvalidOperationException($"{toolName}: invalid tool arguments JSON ({error})");
+        }
+
+        return parsed;
+    }
 
     private static string NormalizeArguments(string? argumentsJson)
         => string.IsNullOrWhiteSpace(argumentsJson)
@@ -227,34 +229,6 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                 },
                 additionalProperties = false
             }),
-            ["find_column_extrema"] = SerializeSchema(new
-            {
-                type = "object",
-                properties = new
-                {
-                    columnName = new
-                    {
-                        type = "string",
-                        description = "Numeric dataset column (exact name, e.g. Process temperature [K])."
-                    },
-                    mode = new
-                    {
-                        type = "string",
-                        description = "Whether to find the global maximum or minimum.",
-                        @enum = new[] { "max", "min" }
-                    },
-                    filter = filterSchema,
-                    extraSelectedColumns = stringArraySchema,
-                    maxTieRows = new
-                    {
-                        type = "integer",
-                        minimum = 1,
-                        maximum = 50
-                    }
-                },
-                required = new[] { "columnName" },
-                additionalProperties = false
-            }),
             ["get_distinct_values"] = SerializeSchema(new
             {
                 type = "object",
@@ -281,6 +255,38 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                 properties = new
                 {
                     groupByColumns = stringArraySchema,
+                    groupByBins = new
+                    {
+                        type = "array",
+                        description =
+                            "Optional numeric histogram dimensions. Bucket lower bound = floor(value/binWidth)*binWidth; upper bound (exclusive) is lower+binWidth (not returned as a column).",
+                        items = new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                columnName = new
+                                {
+                                    type = "string",
+                                    description = "Exact numeric column name from the dataset schema."
+                                },
+                                alias = new
+                                {
+                                    type = "string",
+                                    description = "Output column name for the bucket lower bound (use in sortRules/having)."
+                                },
+                                binWidth = new
+                                {
+                                    type = "number",
+                                    description = "Positive bin width in the same units as the source column.",
+                                    minimum = 1e-9,
+                                    maximum = 1000000
+                                }
+                            },
+                            required = new[] { "columnName", "alias", "binWidth" },
+                            additionalProperties = false
+                        }
+                    },
                     aggregations = new
                     {
                         type = "array",
@@ -308,26 +314,6 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                 required = new[] { "aggregations" },
                 additionalProperties = false
             }),
-            ["compare_subsets"] = SerializeSchema(new
-            {
-                type = "object",
-                properties = new
-                {
-                    leftLabel = new { type = "string" },
-                    leftFilter = filterSchema,
-                    rightLabel = new { type = "string" },
-                    rightFilter = filterSchema,
-                    numericColumns = stringArraySchema,
-                    categoricalColumns = stringArraySchema,
-                    topCategoryCount = new
-                    {
-                        type = "integer",
-                        minimum = 1,
-                        maximum = 20
-                    }
-                },
-                additionalProperties = false
-            }),
             ["search_columns"] = SerializeSchema(new
             {
                 type = "object",
@@ -342,42 +328,6 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                 required = new[] { "keyword" },
                 additionalProperties = false
             }),
-            ["build_report"] = SerializeSchema(new
-            {
-                type = "object",
-                properties = new
-                {
-                    title = new { type = "string" },
-                    baseFilter = filterSchema,
-                    focusColumns = stringArraySchema,
-                    groupByColumns = stringArraySchema,
-                    aggregations = new
-                    {
-                        type = "array",
-                        items = aggregationSchema
-                    },
-                    topCategoryCount = new
-                    {
-                        type = "integer",
-                        minimum = 1,
-                        maximum = 20
-                    }
-                },
-                additionalProperties = false
-            }),
-            ["get_failure_analysis"] = EmptyObjectSchema,
-            ["compare_failure_cohorts"] = EmptyObjectSchema,
-            ["get_operating_condition_summary"] = SerializeSchema(new
-            {
-                type = "object",
-                properties = new
-                {
-                    filter = filterSchema
-                },
-                additionalProperties = false
-            }),
-            ["build_executive_report"] = EmptyObjectSchema,
-            ["get_analysis_examples"] = EmptyObjectSchema
         };
     }
 
@@ -386,8 +336,37 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
         public string Keyword { get; init; } = string.Empty;
     }
 
-    private sealed record OperatingConditionSummaryArguments
+    /// <summary>
+    /// Tool-facing schema: column identity and coarse typing only (summaries and samples belong in profile_columns).
+    /// </summary>
+    private static LeanDatasetSchemaPayload BuildLeanSchemaPayload(DatasetSchema schema)
     {
-        public FilterExpression? Filter { get; init; }
+        var columns = schema.Columns
+            .Select(column => new LeanColumnSchemaPayload(
+                column.Name,
+                column.DataType.ToString(),
+                column.IsNullable,
+                column.IsNumeric,
+                column.IsCategorical))
+            .ToArray();
+
+        return new LeanDatasetSchemaPayload(
+            schema.DatasetName,
+            schema.RowCount,
+            schema.GeneratedAtUtc,
+            columns);
     }
+
+    private sealed record LeanDatasetSchemaPayload(
+        string DatasetName,
+        int RowCount,
+        DateTimeOffset GeneratedAtUtc,
+        IReadOnlyList<LeanColumnSchemaPayload> Columns);
+
+    private sealed record LeanColumnSchemaPayload(
+        string Name,
+        string DataType,
+        bool IsNullable,
+        bool IsNumeric,
+        bool IsCategorical);
 }

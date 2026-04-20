@@ -102,12 +102,43 @@ Previous memory (compact JSON):
         }
 
         var fallbackMem = compactMemoryJson.Length <= 200 ? compactMemoryJson : string.Concat(compactMemoryJson.AsSpan(0, 200), "…");
+        var tail = recentTranscript.Count == 0
+            ? recentTranscript
+            : recentTranscript.TakeLast(Math.Min(recentTranscript.Count, 48)).ToArray();
+        for (var guard = 0; guard < 64 && tail.Count > 0; guard++)
+        {
+            var user = $"""
+Latest user message:
+{CompactPlain(latestUserInput, 800)}
+
+Recent transcript:
+{RenderTranscriptForWorker(tail, 180)}
+
+Recent tool lines:
+{FormatToolExecutionLines(toolExecutions, 120)}
+
+Previous memory (compact JSON):
+{fallbackMem}
+""";
+            if (EstimateWorkerPromptTokens(options, systemPrompt, user) <= budget)
+            {
+                return user;
+            }
+
+            if (tail.Count <= 1)
+            {
+                break;
+            }
+
+            tail = tail.TakeLast(Math.Max(1, tail.Count * 3 / 4)).ToArray();
+        }
+
         return $"""
 Latest user message:
 {CompactPlain(latestUserInput, 800)}
 
 Recent transcript:
-{RenderTranscriptForWorker(recentTranscript, 180)}
+{RenderTranscriptForWorker(Array.Empty<AgentConversationMessage>(), 180)}
 
 Recent tool lines:
 {FormatToolExecutionLines(toolExecutions, 120)}

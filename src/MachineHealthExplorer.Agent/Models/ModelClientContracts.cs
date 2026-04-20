@@ -17,6 +17,10 @@ public sealed record AgentModelRequest
     public int MaxOutputTokens { get; init; } = 1024;
     public bool EnableTools { get; init; } = true;
     public bool UseMinimalToolSchemas { get; init; }
+    /// <summary>
+    /// When true with tools enabled, requests tool_choice=required (OpenAI-compatible). Used only on recovery turns when configured.
+    /// </summary>
+    public bool RequireToolCall { get; init; }
 }
 
 public sealed record AgentModelResponse

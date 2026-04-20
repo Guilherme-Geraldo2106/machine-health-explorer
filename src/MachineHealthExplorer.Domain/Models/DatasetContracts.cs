@@ -413,9 +413,21 @@ public sealed record DistinctValuesResult
     public IReadOnlyList<ValueFrequency> Frequencies { get; init; } = Array.Empty<ValueFrequency>();
 }
 
+/// <summary>
+/// Numeric histogram bin for grouping: bucket lower bound is <c>Floor(value / binWidth) * binWidth</c>
+/// (same idea as <c>GROUP BY FLOOR(column / binWidth) * binWidth</c>).
+/// </summary>
+public sealed record NumericGroupBinSpec
+{
+    public string ColumnName { get; init; } = string.Empty;
+    public string Alias { get; init; } = string.Empty;
+    public double BinWidth { get; init; } = 1.0;
+}
+
 public sealed record GroupAggregationRequest
 {
     public IReadOnlyList<string> GroupByColumns { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<NumericGroupBinSpec> GroupByBins { get; init; } = Array.Empty<NumericGroupBinSpec>();
     public IReadOnlyList<AggregationDefinition> Aggregations { get; init; } = Array.Empty<AggregationDefinition>();
     public FilterExpression? Filter { get; init; }
     public FilterExpression? Having { get; init; }

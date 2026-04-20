@@ -75,7 +75,11 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
                         }
                     };
                 }).ToArray(),
-            tool_choice = !includeTools ? null : "auto",
+            tool_choice = !includeTools
+                ? null
+                : request.RequireToolCall
+                    ? "required"
+                    : "auto",
             temperature = request.Temperature,
             max_tokens = request.MaxOutputTokens
         };

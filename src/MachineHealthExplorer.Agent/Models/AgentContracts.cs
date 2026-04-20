@@ -58,4 +58,17 @@ public sealed record AgentExecutionResult
     public IReadOnlyList<AgentToolExecutionRecord> ToolExecutions { get; init; } = Array.Empty<AgentToolExecutionRecord>();
     public AgentConversationMemory? UpdatedConversationMemory { get; init; }
     public bool ContinuationExhausted { get; init; }
+    public AgentMultiAgentExecutionTrace? MultiAgentTrace { get; init; }
 }
+
+public sealed record AgentMultiAgentExecutionTrace(
+    AgentDispatchPlan Plan,
+    IReadOnlyList<AgentSpecialistRunTrace> SpecialistRuns);
+
+public sealed record AgentSpecialistRunTrace(
+    AgentSpecialistKind SpecialistKind,
+    string DispatchReason,
+    IReadOnlyList<string> AllowedTools,
+    IReadOnlyList<string> ToolsUsed,
+    bool Success,
+    string? FailureMessage);

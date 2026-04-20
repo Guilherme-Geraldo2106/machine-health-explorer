@@ -1,5 +1,6 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Domain.Abstractions;
 using MachineHealthExplorer.Domain.Models;
 using MachineHealthExplorer.Logging.Abstractions;
 using MachineHealthExplorer.Tools.Abstractions;
@@ -10,6 +11,8 @@ namespace MachineHealthExplorer.Host;
 public sealed class ConsoleHostedService : BackgroundService
 {
     private readonly IDatasetToolService _toolService;
+    private readonly IDatasetAnalyticsEngine _datasetAnalyticsEngine;
+    private readonly IMachineHealthAnalyticsService _machineHealthAnalytics;
     private readonly IAgentOrchestrator _agentOrchestrator;
     private readonly IHostApplicationLifetime _hostApplicationLifetime;
     private readonly AgentOptions _agentOptions;
@@ -20,12 +23,16 @@ public sealed class ConsoleHostedService : BackgroundService
 
     public ConsoleHostedService(
         IDatasetToolService toolService,
+        IDatasetAnalyticsEngine datasetAnalyticsEngine,
+        IMachineHealthAnalyticsService machineHealthAnalytics,
         IAgentOrchestrator agentOrchestrator,
         AgentOptions agentOptions,
         IChatSessionManager chatSessionManager,
         IHostApplicationLifetime hostApplicationLifetime)
     {
         _toolService = toolService ?? throw new ArgumentNullException(nameof(toolService));
+        _datasetAnalyticsEngine = datasetAnalyticsEngine ?? throw new ArgumentNullException(nameof(datasetAnalyticsEngine));
+        _machineHealthAnalytics = machineHealthAnalytics ?? throw new ArgumentNullException(nameof(machineHealthAnalytics));
         _agentOrchestrator = agentOrchestrator ?? throw new ArgumentNullException(nameof(agentOrchestrator));
         _agentOptions = agentOptions ?? throw new ArgumentNullException(nameof(agentOptions));
         _chatSessionManager = chatSessionManager ?? throw new ArgumentNullException(nameof(chatSessionManager));
@@ -270,25 +277,25 @@ public sealed class ConsoleHostedService : BackgroundService
 
     private async Task PrintFailureAnalysisAsync(CancellationToken cancellationToken)
     {
-        var summary = await _toolService.GetFailureAnalysisAsync(cancellationToken).ConfigureAwait(false);
+        var summary = await _machineHealthAnalytics.GetFailureAnalysisAsync(cancellationToken).ConfigureAwait(false);
         PrintFailureAnalysis(summary);
     }
 
     private async Task PrintFailureComparisonAsync(CancellationToken cancellationToken)
     {
-        var comparison = await _toolService.CompareFailureCohortsAsync(cancellationToken).ConfigureAwait(false);
+        var comparison = await _machineHealthAnalytics.CompareFailureCohortsAsync(cancellationToken).ConfigureAwait(false);
         PrintComparison(comparison);
     }
 
     private async Task PrintExecutiveReportAsync(CancellationToken cancellationToken)
     {
-        var report = await _toolService.BuildExecutiveReportAsync(cancellationToken).ConfigureAwait(false);
+        var report = await _machineHealthAnalytics.BuildExecutiveReportAsync(cancellationToken).ConfigureAwait(false);
         PrintReport(report);
     }
 
     private async Task PrintExamplesAsync(CancellationToken cancellationToken)
     {
-        var examples = await _toolService.GetAnalysisExamplesAsync(cancellationToken).ConfigureAwait(false);
+        var examples = await _machineHealthAnalytics.GetAnalysisExamplesAsync(cancellationToken).ConfigureAwait(false);
         foreach (var example in examples)
         {
             Console.WriteLine($"- {example.Name}: {example.Description}");
@@ -304,7 +311,7 @@ public sealed class ConsoleHostedService : BackgroundService
             return;
         }
 
-        var examples = await _toolService.GetAnalysisExamplesAsync(cancellationToken).ConfigureAwait(false);
+        var examples = await _machineHealthAnalytics.GetAnalysisExamplesAsync(cancellationToken).ConfigureAwait(false);
         var example = examples.FirstOrDefault(candidate => candidate.Name.Equals(name.Trim(), StringComparison.OrdinalIgnoreCase));
         if (example is null)
         {
@@ -367,7 +374,7 @@ public sealed class ConsoleHostedService : BackgroundService
                 PrintGroups(await _toolService.GroupAndAggregateAsync(example.GroupAggregationQuery, cancellationToken).ConfigureAwait(false));
                 break;
             case AnalysisExampleKind.SubsetComparison when example.ComparisonQuery is not null:
-                PrintComparison(await _toolService.CompareSubsetsAsync(example.ComparisonQuery, cancellationToken).ConfigureAwait(false));
+                PrintComparison(await _datasetAnalyticsEngine.CompareSubsetsAsync(example.ComparisonQuery, cancellationToken).ConfigureAwait(false));
                 break;
             default:
                 Console.WriteLine("The example is not configured correctly.");

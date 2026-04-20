@@ -247,23 +247,38 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
         ValidatePaging(request.Page, request.PageSize);
         var (snapshot, schemaLookup) = await GetContextAsync(cancellationToken).ConfigureAwait(false);
 
-        ValidateColumns(request.GroupByColumns, schemaLookup);
+        var binSpecs = request.GroupByBins?.Count > 0
+            ? request.GroupByBins.ToArray()
+            : Array.Empty<NumericGroupBinSpec>();
+
+        var groupByColumns = request.GroupByColumns.Count == 0
+            ? Array.Empty<string>()
+            : request.GroupByColumns.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+        ValidateGroupByBins(binSpecs, groupByColumns, schemaLookup);
+
+        ValidateColumns(groupByColumns, schemaLookup);
         ValidateFilter(request.Filter, schemaLookup);
 
         var aggregations = request.Aggregations.Count == 0
             ? [DatasetAggregations.Count("row_count")]
             : request.Aggregations.ToArray();
 
-        ValidateAggregations(aggregations, request.GroupByColumns, schemaLookup);
+        var groupDimensionNames = groupByColumns.Concat(binSpecs.Select(spec => spec.Alias)).ToArray();
+        ValidateAggregations(aggregations, groupDimensionNames, schemaLookup);
 
         var filteredRows = FilterRows(snapshot.Rows, request.Filter, schemaLookup);
 
-        var groupedRows = BuildGroups(filteredRows, request.GroupByColumns)
-            .Select(group => BuildGroupAggregationRow(group.KeyValues, group.Rows, request.GroupByColumns, aggregations, schemaLookup))
-            .ToArray();
+        var groupedRows = binSpecs.Length == 0
+            ? BuildGroups(filteredRows, groupByColumns)
+                .Select(group => BuildGroupAggregationRow(group.KeyValues, group.Rows, groupDimensionNames, aggregations, schemaLookup))
+                .ToArray()
+            : BuildGroupsWithBins(filteredRows, groupByColumns, binSpecs)
+                .Select(group => BuildGroupAggregationRow(group.KeyValues, group.Rows, groupDimensionNames, aggregations, schemaLookup))
+                .ToArray();
 
-        var aggregatedColumns = request.GroupByColumns.Concat(aggregations.Select(aggregation => aggregation.Alias)).ToArray();
-        var aggregateSchema = BuildAggregateSchema(request.GroupByColumns, aggregations, schemaLookup);
+        var aggregatedColumns = groupDimensionNames.Concat(aggregations.Select(aggregation => aggregation.Alias)).ToArray();
+        var aggregateSchema = BuildAggregateSchema(groupByColumns, binSpecs, aggregations, schemaLookup);
 
         ValidateFilter(request.Having, aggregateSchema);
         ValidateColumns(request.SortRules.Select(rule => rule.ColumnName), aggregateSchema);
@@ -401,7 +416,7 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
 
         if (failureColumns.Length > 0)
         {
-            highlights.Add($"Failure-oriented columns detected: {string.Join(", ", failureColumns)}");
+            highlights.Add($"Boolean-like or binary label columns (heuristic name match): {string.Join(", ", failureColumns)}");
         }
 
         return new DatasetDescription
@@ -503,6 +518,150 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
         };
     }
 
+    private static void ValidateGroupByBins(
+        IReadOnlyList<NumericGroupBinSpec> bins,
+        IReadOnlyList<string> groupByColumns,
+        IReadOnlyDictionary<string, ColumnSchema> schemaLookup)
+    {
+        var groupNameSet = new HashSet<string>(groupByColumns, StringComparer.OrdinalIgnoreCase);
+        foreach (var bin in bins)
+        {
+            if (string.IsNullOrWhiteSpace(bin.ColumnName))
+            {
+                throw new ArgumentException("Each groupByBins item must include a non-empty columnName.");
+            }
+
+            if (string.IsNullOrWhiteSpace(bin.Alias))
+            {
+                throw new ArgumentException("Each groupByBins item must include a non-empty alias.");
+            }
+
+            if (groupNameSet.Contains(bin.Alias.Trim()))
+            {
+                throw new ArgumentException($"groupByBins alias '{bin.Alias}' collides with a groupByColumns name.");
+            }
+
+            if (bin.BinWidth <= 0
+                || double.IsNaN(bin.BinWidth)
+                || double.IsInfinity(bin.BinWidth)
+                || bin.BinWidth > 1_000_000d)
+            {
+                throw new ArgumentException($"BinWidth for '{bin.Alias}' must be a finite positive number within a reasonable range.");
+            }
+
+            var column = GetRequiredColumn(bin.ColumnName.Trim(), schemaLookup);
+            if (!column.IsNumeric)
+            {
+                throw new ArgumentException($"groupByBins column '{column.Name}' must be numeric.");
+            }
+        }
+
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var bin in bins)
+        {
+            if (!aliases.Add(bin.Alias.Trim()))
+            {
+                throw new ArgumentException($"Duplicate groupByBins alias '{bin.Alias}'.");
+            }
+        }
+    }
+
+    private static IReadOnlyList<(IReadOnlyList<object?> KeyValues, DatasetRow[] Rows)> BuildGroupsWithBins(
+        IReadOnlyList<DatasetRow> rows,
+        IReadOnlyList<string> groupByColumns,
+        IReadOnlyList<NumericGroupBinSpec> binSpecs)
+    {
+        var projected = new List<(GroupKey Key, DatasetRow Row)>();
+        foreach (var row in rows)
+        {
+            if (!TryBuildBinnedGroupKey(row, groupByColumns, binSpecs, out var keyValues))
+            {
+                continue;
+            }
+
+            projected.Add((new GroupKey(keyValues), row));
+        }
+
+        if (projected.Count == 0)
+        {
+            return Array.Empty<(IReadOnlyList<object?>, DatasetRow[])>();
+        }
+
+        return projected
+            .GroupBy(tuple => tuple.Key, GroupKeyComparer.Instance)
+            .Select(group => (KeyValues: (IReadOnlyList<object?>)group.Key.Values, Rows: group.Select(t => t.Row).ToArray()))
+            .ToArray();
+    }
+
+    private static bool TryBuildBinnedGroupKey(
+        DatasetRow row,
+        IReadOnlyList<string> groupByColumns,
+        IReadOnlyList<NumericGroupBinSpec> binSpecs,
+        out object?[] keyValues)
+    {
+        keyValues = new object?[groupByColumns.Count + binSpecs.Count];
+        for (var i = 0; i < groupByColumns.Count; i++)
+        {
+            keyValues[i] = GetValue(row, groupByColumns[i]);
+        }
+
+        for (var b = 0; b < binSpecs.Count; b++)
+        {
+            var spec = binSpecs[b];
+            if (!TryGetNumericMeasurement(GetValue(row, spec.ColumnName), out var measurement))
+            {
+                return false;
+            }
+
+            var width = spec.BinWidth;
+            var lower = Math.Floor(measurement / width) * width;
+            keyValues[groupByColumns.Count + b] = lower;
+        }
+
+        return true;
+    }
+
+    private static bool TryGetNumericMeasurement(object? raw, out double value)
+    {
+        value = default;
+        if (raw is null)
+        {
+            return false;
+        }
+
+        switch (raw)
+        {
+            case double d:
+                value = d;
+                return true;
+            case float f:
+                value = f;
+                return true;
+            case int i:
+                value = i;
+                return true;
+            case long l:
+                value = l;
+                return true;
+            case decimal m:
+                value = (double)m;
+                return true;
+            case string text when double.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsed):
+                value = parsed;
+                return true;
+            default:
+                try
+                {
+                    value = Convert.ToDouble(raw, System.Globalization.CultureInfo.InvariantCulture);
+                    return !double.IsNaN(value) && !double.IsInfinity(value);
+                }
+                catch
+                {
+                    return false;
+                }
+        }
+    }
+
     private async Task<(DatasetSnapshot Snapshot, IReadOnlyDictionary<string, ColumnSchema> SchemaLookup)> GetContextAsync(CancellationToken cancellationToken)
     {
         var snapshot = await _repository.GetDatasetAsync(cancellationToken).ConfigureAwait(false);
@@ -581,7 +740,7 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
 
             if (!aliases.Add(aggregation.Alias))
             {
-                throw new ArgumentException($"Aggregation alias '{aggregation.Alias}' is duplicated or collides with a group-by column.");
+                throw new ArgumentException($"Aggregation alias '{aggregation.Alias}' is duplicated or collides with a grouping dimension.");
             }
 
             ValidateFilter(aggregation.Filter, schemaLookup);
@@ -647,6 +806,7 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
 
     private static IReadOnlyDictionary<string, ColumnSchema> BuildAggregateSchema(
         IReadOnlyList<string> groupByColumns,
+        IReadOnlyList<NumericGroupBinSpec> binSpecs,
         IReadOnlyList<AggregationDefinition> aggregations,
         IReadOnlyDictionary<string, ColumnSchema> sourceSchema)
     {
@@ -654,6 +814,12 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
         foreach (var groupByColumn in groupByColumns)
         {
             result[groupByColumn] = sourceSchema[groupByColumn];
+        }
+
+        foreach (var bin in binSpecs)
+        {
+            var source = sourceSchema[bin.ColumnName];
+            result[bin.Alias] = source with { Name = bin.Alias };
         }
 
         foreach (var aggregation in aggregations)

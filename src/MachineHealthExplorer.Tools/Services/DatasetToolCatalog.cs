@@ -16,100 +16,49 @@ public sealed class DatasetToolCatalog : IDatasetToolCatalog
         new()
         {
             Name = "describe_dataset",
-            Description = "Returns a concise overview of numeric, categorical, and failure-oriented columns.",
+            Description = "Returns a neutral overview: row/column counts, numeric columns, categorical columns, and boolean-like columns (name heuristic only).",
             InputHints = ["No arguments"],
-            ExamplePrompts = ["Summarize this predictive maintenance dataset."]
+            ExamplePrompts = ["Summarize the loaded tabular dataset at a high level."]
         },
         new()
         {
             Name = "profile_columns",
             Description = "Profiles one or more columns with scoped completeness, distinct counts, and summaries.",
             InputHints = ["ColumnProfilingRequest"],
-            ExamplePrompts = ["Profile Type and Torque [Nm] for failed machines only."]
+            ExamplePrompts = ["Profile Type and Torque [Nm] for rows matching a filter."]
         },
         new()
         {
             Name = "query_rows",
-            Description = "Executes a filtered, sorted, paged row query.",
+            Description = "Executes a filtered, sorted, paged row query (tabular data only).",
             InputHints = ["QueryRequest"],
-            ExamplePrompts = ["Show failed Type L or M machines with high torque and heavy tool wear."]
-        },
-        new()
-        {
-            Name = "find_column_extrema",
-            Description = "Finds rows where a numeric column reaches its global max or min (ties), including UDI when present.",
-            InputHints = ["ColumnExtremaRequest"],
-            ExamplePrompts = ["Which machine row has the highest process temperature?", "At what UDI does air temperature peak?"]
+            ExamplePrompts = ["List rows matching a numeric range and sort by a column."]
         },
         new()
         {
             Name = "get_distinct_values",
             Description = "Returns distinct values and frequencies for a column.",
             InputHints = ["DistinctValuesRequest"],
-            ExamplePrompts = ["What machine types exist in the dataset?"]
+            ExamplePrompts = ["What distinct categories exist for a column?"]
         },
         new()
         {
             Name = "group_and_aggregate",
-            Description = "Groups rows and computes reusable aggregate metrics with optional having filters.",
+            Description =
+                "Groups rows by explicit columns and/or numeric histogram bins (bucket lower = floor(value/binWidth)*binWidth), then computes aggregations (count, sum, etc.) with optional per-aggregation filters.",
             InputHints = ["GroupAggregationRequest"],
-            ExamplePrompts = ["Group the dataset by Type and compare failure counts with average torque."]
-        },
-        new()
-        {
-            Name = "compare_subsets",
-            Description = "Compares two filtered cohorts using numeric and categorical summaries.",
-            InputHints = ["SubsetComparisonRequest"],
-            ExamplePrompts = ["Compare high-wear failed machines against low-wear healthy machines."]
+            ExamplePrompts =
+            [
+                "Count rows and conditional counts per 1-unit bins of a numeric column.",
+                "Group by two categorical columns and compute averages."
+            ]
         },
         new()
         {
             Name = "search_columns",
             Description = "Searches the inferred schema for columns relevant to a keyword.",
             InputHints = ["keyword"],
-            ExamplePrompts = ["Find columns related to torque or wear."]
-        },
-        new()
-        {
-            Name = "build_report",
-            Description = "Builds a structured report from generic analytical requests.",
-            InputHints = ["ReportRequest"],
-            ExamplePrompts = ["Build a report for failures grouped by Type."]
-        },
-        new()
-        {
-            Name = "get_failure_analysis",
-            Description = "Returns failure counts, rate, common failure modes, and top metric deltas.",
-            InputHints = ["No arguments"],
-            ExamplePrompts = ["Summarize failure patterns in the AI4I dataset."]
-        },
-        new()
-        {
-            Name = "compare_failure_cohorts",
-            Description = "Compares failed rows against healthy rows using reusable analytics services.",
-            InputHints = ["No arguments"],
-            ExamplePrompts = ["Compare failed and healthy machines."]
-        },
-        new()
-        {
-            Name = "get_operating_condition_summary",
-            Description = "Summarizes operating metrics and categorical context for an optional filter.",
-            InputHints = ["Optional FilterExpression"],
-            ExamplePrompts = ["Summarize operating conditions for failed Type L machines."]
-        },
-        new()
-        {
-            Name = "build_executive_report",
-            Description = "Builds a concise executive report tailored to machine-health analysis.",
-            InputHints = ["No arguments"],
-            ExamplePrompts = ["Create an executive summary for this predictive maintenance dataset."]
-        },
-        new()
-        {
-            Name = "get_analysis_examples",
-            Description = "Returns reusable multi-filter, grouping, and comparison examples.",
-            InputHints = ["No arguments"],
-            ExamplePrompts = ["Show me example analytics requests I can run."]
+            ExamplePrompts = ["Find columns related to torque or temperature."]
         }
     ];
 

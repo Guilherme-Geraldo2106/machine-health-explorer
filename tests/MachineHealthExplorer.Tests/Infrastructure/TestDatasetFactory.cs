@@ -33,7 +33,7 @@ internal static class TestDatasetFactory
     public static IDatasetToolService CreateToolService(CsvDatasetRepository repository)
     {
         var analyticsEngine = CreateAnalyticsEngine(repository);
-        return new DatasetToolService(analyticsEngine, new MachineHealthAnalyticsService(analyticsEngine));
+        return new DatasetToolService(analyticsEngine);
     }
 
     private static string ResolveDatasetPath()

@@ -1,5 +1,6 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.MultiAgent;
 using MachineHealthExplorer.Agent.Serialization;
 using MachineHealthExplorer.Agent.Services;
 using MachineHealthExplorer.Domain.Models;
@@ -15,27 +16,52 @@ namespace MachineHealthExplorer.Tests;
 
 public sealed class AgentRuntimeTests
 {
+    private const string MinimalSpecialistSynthesisJson =
+        """{"relevantColumns":[],"ambiguities":[],"evidences":[],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}""";
+
+    private static AgentModelResponse CreateDescribeDatasetToolCallResponse()
+        => new()
+        {
+            Model = "qwen-test",
+            FinishReason = "tool_calls",
+            ToolCalls =
+            [
+                new AgentToolCall
+                {
+                    Id = "tool_1",
+                    Name = "describe_dataset",
+                    ArgumentsJson = "{}"
+                }
+            ]
+        };
+
+    private static AgentModelResponse CreateSpecialistNoToolCallResponse()
+        => new()
+        {
+            Model = "qwen-test",
+            FinishReason = "stop"
+        };
+
+    private static AgentModelResponse CreateSpecialistSynthesisJsonResponse()
+        => new()
+        {
+            Model = "qwen-test",
+            Content = MinimalSpecialistSynthesisJson,
+            FinishReason = "stop"
+        };
+
     [Fact]
     public async Task Orchestrator_ExecutesToolCalls_AndReturnsFinalAssistantMessage()
     {
         var chatClient = new StubAgentChatClient(
+            CreateDescribeDatasetToolCallResponse(),
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {
                 Model = "qwen-test",
-                ToolCalls =
-                [
-                    new AgentToolCall
-                    {
-                        Id = "tool_1",
-                        Name = "describe_dataset",
-                        ArgumentsJson = "{}"
-                    }
-                ]
-            },
-            new AgentModelResponse
-            {
-                Model = "qwen-test",
-                Content = "The dataset has 10,000 rows and 14 columns."
+                Content = "The dataset has 10,000 rows and 14 columns.",
+                FinishReason = "stop"
             });
 
         var toolRuntime = new StubAgentToolRuntime();
@@ -60,25 +86,11 @@ public sealed class AgentRuntimeTests
         Assert.Equal("qwen-test", result.Model);
         Assert.Equal("The dataset has 10,000 rows and 14 columns.", result.Message);
         Assert.Single(result.ToolExecutions);
-        Assert.Collection(
-            result.UpdatedConversation,
-            message => Assert.Equal(AgentConversationRole.User, message.Role),
-            message =>
-            {
-                Assert.Equal(AgentConversationRole.Assistant, message.Role);
-                Assert.Single(message.ToolCalls);
-            },
-            message =>
-            {
-                Assert.Equal(AgentConversationRole.Tool, message.Role);
-                Assert.Equal("describe_dataset", message.Name);
-                Assert.Contains("mhe_tool_evidence_v1", message.Content ?? string.Empty, StringComparison.Ordinal);
-            },
-            message =>
-            {
-                Assert.Equal(AgentConversationRole.Assistant, message.Role);
-                Assert.Equal("The dataset has 10,000 rows and 14 columns.", message.Content);
-            });
+        Assert.Equal(AgentConversationRole.User, result.UpdatedConversation[0].Role);
+        Assert.Equal(AgentConversationRole.Assistant, result.UpdatedConversation[1].Role);
+        Assert.Equal("The dataset has 10,000 rows and 14 columns.", result.UpdatedConversation[1].Content);
+        Assert.Empty(result.UpdatedConversation[1].ToolCalls);
+        Assert.Contains("describe_dataset", result.ToolExecutions[0].ToolName, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -201,6 +213,8 @@ public sealed class AgentRuntimeTests
     public async Task Orchestrator_ContinuesTruncatedFinalAnswer_Automatically()
     {
         var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {
                 Model = "qwen-test",
@@ -242,6 +256,8 @@ public sealed class AgentRuntimeTests
     public async Task Orchestrator_MergesOverlappingContinuation_WithoutObviousDuplication()
     {
         var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {
                 Model = "qwen-test",
@@ -277,6 +293,8 @@ public sealed class AgentRuntimeTests
     public async Task Orchestrator_SetsContinuationExhausted_WhenContinuationBudgetEnds()
     {
         var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse { Model = "qwen-test", Content = "a", FinishReason = "length" },
             new AgentModelResponse { Model = "qwen-test", Content = "b", FinishReason = "length" },
             new AgentModelResponse { Model = "qwen-test", Content = "c", FinishReason = "length" },
@@ -321,12 +339,15 @@ public sealed class AgentRuntimeTests
             LanguagePreference = "pt"
         };
 
-        var chatClient = new StubAgentChatClient(new AgentModelResponse
-        {
-            Model = "qwen-test",
-            Content = "Resposta pós-compactação.",
-            FinishReason = "stop"
-        });
+        var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
+            new AgentModelResponse
+            {
+                Model = "qwen-test",
+                Content = "Resposta pós-compactação.",
+                FinishReason = "stop"
+            });
 
         var toolRuntime = new StubAgentToolRuntime();
         var orchestrator = new LmStudioAgentOrchestrator(
@@ -370,19 +391,9 @@ public sealed class AgentRuntimeTests
         """;
 
         var chatClient = new StubAgentChatClient(
-            new AgentModelResponse
-            {
-                Model = "qwen-test",
-                ToolCalls =
-                [
-                    new AgentToolCall
-                    {
-                        Id = "tool_1",
-                        Name = "describe_dataset",
-                        ArgumentsJson = "{}"
-                    }
-                ]
-            },
+            CreateDescribeDatasetToolCallResponse(),
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {
                 Model = "qwen-test",
@@ -418,6 +429,7 @@ public sealed class AgentRuntimeTests
                 Model = "qwen-test",
                 MaxToolIterations = 3,
                 EnableWorkerPasses = true,
+                EnableMemoryWorkerAfterFinalAnswer = true,
                 EnableContextCompaction = false
             },
             chatClient,
@@ -437,16 +449,20 @@ public sealed class AgentRuntimeTests
     [Fact]
     public async Task Orchestrator_RemainsCoherentAcrossLongChat_WithCompaction()
     {
-        var responses = Enumerable.Range(0, 24)
-            .Select(index => new AgentModelResponse
+        var responses = new List<AgentModelResponse>();
+        for (var turn = 0; turn < 12; turn++)
+        {
+            responses.Add(CreateSpecialistNoToolCallResponse());
+            responses.Add(CreateSpecialistSynthesisJsonResponse());
+            responses.Add(new AgentModelResponse
             {
                 Model = "qwen-test",
-                Content = $"resposta-{index}",
+                Content = $"resposta-{turn}",
                 FinishReason = "stop"
-            })
-            .ToArray();
+            });
+        }
 
-        var chatClient = new StubAgentChatClient(responses);
+        var chatClient = new StubAgentChatClient(responses.ToArray());
 
         var toolRuntime = new StubAgentToolRuntime();
         var orchestrator = new LmStudioAgentOrchestrator(
@@ -488,12 +504,9 @@ public sealed class AgentRuntimeTests
     [Fact]
     public async Task Orchestrator_ScopesTools_DownFromFullCatalog()
     {
-        const string plannerJson = """
-        {"need_tools":true,"tools":["describe_dataset"],"reason":"minimal"}
-        """;
-
         var recording = new RecordingStubAgentChatClient(
-            new AgentModelResponse { Model = "m", Content = plannerJson, FinishReason = "stop" },
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse { Model = "m", Content = "done", FinishReason = "stop" });
 
         var orchestrator = new LmStudioAgentOrchestrator(
@@ -517,13 +530,17 @@ public sealed class AgentRuntimeTests
         });
 
         Assert.Equal("done", result.Message);
-        Assert.True(recording.Requests.Count >= 2);
-        Assert.Empty(recording.Requests[0].Tools);
-        Assert.False(recording.Requests[0].EnableTools);
-        Assert.True(recording.Requests[1].EnableTools);
-        Assert.Single(recording.Requests[1].Tools);
-        Assert.Equal("describe_dataset", recording.Requests[1].Tools[0].Name);
-        Assert.True(recording.Requests[1].UseMinimalToolSchemas);
+        var discoveryTools = SpecialistToolAllowlists.ForSpecialist(AgentSpecialistKind.Discovery)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var specialistRequest = recording.Requests.First(request => request.EnableTools && request.Tools.Count > 0);
+        Assert.All(specialistRequest.Tools, tool => Assert.Contains(tool.Name, discoveryTools));
+
+        var composerRequest = recording.Requests.Last(request =>
+            !request.EnableTools
+            && request.SystemPrompt.Contains("FinalComposer", StringComparison.Ordinal));
+        Assert.False(composerRequest.EnableTools);
+        Assert.Empty(composerRequest.Tools);
     }
 
     [Fact]
@@ -540,12 +557,15 @@ public sealed class AgentRuntimeTests
             });
         }
 
-        var chatClient = new StubAgentChatClient(new AgentModelResponse
-        {
-            Model = "m",
-            Content = "ok",
-            FinishReason = "stop"
-        });
+        var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = "ok",
+                FinishReason = "stop"
+            });
 
         var orchestrator = new LmStudioAgentOrchestrator(
             new AgentOptions
@@ -581,6 +601,8 @@ public sealed class AgentRuntimeTests
     public async Task Orchestrator_RecoversFromReasoningOnlyResponse_WithEmptyContent()
     {
         var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {
                 Model = "m",
@@ -621,6 +643,8 @@ public sealed class AgentRuntimeTests
     public async Task Orchestrator_PersistsSingleConsolidatedAssistantTurn_AfterTruncationContinuation()
     {
         var chatClient = new StubAgentChatClient(
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse { Model = "m", Content = "PART-A", FinishReason = "length" },
             new AgentModelResponse { Model = "m", Content = "PART-B", FinishReason = "stop" });
 
@@ -661,6 +685,9 @@ public sealed class AgentRuntimeTests
 
         var chatClient = new StubAgentChatClient(
             new AgentModelResponse { Model = "m", Content = "rolled_up_summary_from_worker", FinishReason = "stop" },
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
+            new AgentModelResponse { Model = "m", Content = "final answer", FinishReason = "stop" },
             new AgentModelResponse { Model = "m", Content = "final answer", FinishReason = "stop" },
             new AgentModelResponse
             {
@@ -687,6 +714,7 @@ public sealed class AgentRuntimeTests
                 CompactionKeepRecentMessages = 6,
                 EnableContextCompaction = true,
                 EnableWorkerPasses = true,
+                EnableMemoryWorkerAfterFinalAnswer = true,
                 EnableDynamicToolScoping = false,
                 EnableToolPlannerPass = false,
                 EnableTokenBudgetCompaction = false
@@ -887,20 +915,11 @@ public sealed class AgentRuntimeTests
     }
 
     [Fact]
-    public async Task Orchestrator_PlannerTruncated_ReexposesMinimalToolkit_AfterDescribe_ForPortugueseNumericQuestion()
+    public async Task Orchestrator_QueryAnalysisSpecialist_IncludesAggregationTools_ForPortugueseTemperatureQuestion()
     {
         var recording = new RecordingStubAgentChatClient(
-            new AgentModelResponse { Model = "m", Content = "", ReasoningContent = "{", FinishReason = "length" },
-            new AgentModelResponse
-            {
-                Model = "m",
-                ToolCalls =
-                [
-                    new AgentToolCall { Id = "t1", Name = "describe_dataset", ArgumentsJson = "{}" }
-                ],
-                FinishReason = "tool_calls"
-            },
-            new AgentModelResponse { Model = "m", Content = "", ReasoningContent = "...", FinishReason = "length" },
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse { Model = "m", Content = "Resposta final.", FinishReason = "stop" });
 
         var orchestrator = new LmStudioAgentOrchestrator(
@@ -923,9 +942,13 @@ public sealed class AgentRuntimeTests
             UserInput = "qual o momento de maior temperatura ? e qual o valor dela em celsius e k ?"
         });
 
-        Assert.True(recording.Requests.Count >= 4);
-        var secondAgentRequest = recording.Requests[3];
-        Assert.Contains(secondAgentRequest.Tools,
+        var queryTools = SpecialistToolAllowlists.ForSpecialist(AgentSpecialistKind.QueryAnalysis)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var specialistRequest = recording.Requests.First(request => request.EnableTools && request.Tools.Count > 0);
+        Assert.All(specialistRequest.Tools, tool => Assert.Contains(tool.Name, queryTools));
+        Assert.Contains(
+            specialistRequest.Tools,
             tool => tool.Name.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -933,6 +956,13 @@ public sealed class AgentRuntimeTests
     public async Task Orchestrator_FinalAnswer_ContainsNoPseudoToolMarkers_WhenModelEmitsMalformedPseudo()
     {
         var chatClient = new StubAgentChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = "<|tool_call>call:analyze_column{}<tool_call|>",
+                FinishReason = "stop"
+            },
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {
                 Model = "m",
@@ -975,16 +1005,24 @@ public sealed class AgentRuntimeTests
     [Fact]
     public async Task Orchestrator_DoesNotExecuteUnknownToolNames_FromModelToolCalls()
     {
-        var chatClient = new StubAgentChatClient(new AgentModelResponse
-        {
-            Model = "m",
-            Content = "Resposta direta.",
-            ToolCalls =
-            [
-                new AgentToolCall { Id = "1", Name = "analyze_column", ArgumentsJson = "{}" }
-            ],
-            FinishReason = "tool_calls"
-        });
+        var chatClient = new StubAgentChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = "Resposta direta.",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "1", Name = "analyze_column", ArgumentsJson = "{}" }
+                ],
+                FinishReason = "tool_calls"
+            },
+            CreateSpecialistSynthesisJsonResponse(),
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = "Resposta direta.",
+                FinishReason = "stop"
+            });
 
         var orchestrator = new LmStudioAgentOrchestrator(
             new AgentOptions
@@ -1010,12 +1048,9 @@ public sealed class AgentRuntimeTests
     [Fact]
     public async Task Orchestrator_FallbackExposesMinimalToolkit_WhenPlannerSaysNoTools_ForPortugueseNumericQuestion()
     {
-        const string plannerNoTools = """
-        {"need_tools":false,"tools":[],"reason":"wrong"}
-        """;
-
         var recording = new RecordingStubAgentChatClient(
-            new AgentModelResponse { Model = "m", Content = plannerNoTools, FinishReason = "stop" },
+            CreateSpecialistNoToolCallResponse(),
+            CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse { Model = "m", Content = "ok", FinishReason = "stop" });
 
         var orchestrator = new LmStudioAgentOrchestrator(
@@ -1038,55 +1073,37 @@ public sealed class AgentRuntimeTests
             UserInput = "ei, qual a temperatura maxima ?"
         });
 
-        Assert.True(recording.Requests.Count >= 2);
-        var scoped = recording.Requests[1].Tools;
-        Assert.Contains(scoped, tool => tool.Name.Equals("get_schema", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(scoped, tool => tool.Name.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
+        var queryTools = SpecialistToolAllowlists.ForSpecialist(AgentSpecialistKind.QueryAnalysis)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var specialistRequest = recording.Requests.First(request => request.EnableTools && request.Tools.Count > 0);
+        Assert.All(specialistRequest.Tools, tool => Assert.Contains(tool.Name, queryTools));
+        Assert.Contains(specialistRequest.Tools, tool => tool.Name.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
     public async Task Orchestrator_DoesNotPersistPseudoToolCallMarkers_AfterLmStudioCompatibilityPass()
     {
-        const string pseudoResponse = """
-        {
-          "model": "m",
-          "choices": [
+        var chatClient = new StubAgentChatClient(
+            new AgentModelResponse
             {
-              "message": {
-                "role": "assistant",
-                "content": "<|tool_call|>call: query_schema{}<|tool_call|>",
-                "tool_calls": []
-              },
-              "finish_reason": "stop"
-            }
-          ]
-        }
-        """;
-
-        const string finalResponse = """
-        {
-          "model": "m",
-          "choices": [
+                Model = "m",
+                Content = "<|tool_call|>call: query_schema{}<|tool_call|>",
+                FinishReason = "stop"
+            },
+            CreateSpecialistSynthesisJsonResponse(),
+            new AgentModelResponse
             {
-              "message": {
-                "role": "assistant",
-                "content": "Temperatura máxima: 318 (valor ilustrativo).",
-                "tool_calls": []
-              },
-              "finish_reason": "stop"
-            }
-          ]
-        }
-        """;
-
-        using var httpClient = new HttpClient(new QueuedStubHttpMessageHandler(pseudoResponse, finalResponse))
-        {
-            BaseAddress = new Uri("http://127.0.0.1:1234/v1/")
-        };
-
-        using var chatClient = new LmStudioChatClient(
-            new AgentOptions { BaseUrl = "http://127.0.0.1:1234/v1", Model = "m" },
-            httpClient);
+                Model = "m",
+                Content = "<|tool_call|>call: query_schema{}<|tool_call|>",
+                FinishReason = "stop"
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = "Temperatura máxima: 318 (valor ilustrativo).",
+                FinishReason = "stop"
+            });
 
         var orchestrator = new LmStudioAgentOrchestrator(
             new AgentOptions
@@ -1250,41 +1267,14 @@ public sealed class AgentRuntimeTests
             return Task.FromResult(new QueryResult());
         }
 
-        public Task<ColumnExtremaResult> FindColumnExtremaRowsAsync(ColumnExtremaRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(new ColumnExtremaResult());
-
         public Task<GroupAggregationResult> GroupAndAggregateAsync(GroupAggregationRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new GroupAggregationResult());
 
         public Task<DistinctValuesResult> GetDistinctValuesAsync(DistinctValuesRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DistinctValuesResult());
 
-        public Task<SubsetComparisonResult> CompareSubsetsAsync(SubsetComparisonRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(new SubsetComparisonResult());
-
         public Task<SearchColumnsResult> SearchColumnsAsync(string keyword, CancellationToken cancellationToken = default)
             => Task.FromResult(new SearchColumnsResult());
-
-        public Task<DatasetReport> BuildReportAsync(ReportRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(new DatasetReport());
-
-        public Task<FailureAnalysisSummary> GetFailureAnalysisAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(new FailureAnalysisSummary());
-
-        public Task<SubsetComparisonResult> CompareFailureCohortsAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(new SubsetComparisonResult());
-
-        public Task<IReadOnlyList<ValueFrequency>> GetFailureModesAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<ValueFrequency>>(Array.Empty<ValueFrequency>());
-
-        public Task<OperatingConditionSummary> GetOperatingConditionSummaryAsync(FilterExpression? filter = null, CancellationToken cancellationToken = default)
-            => Task.FromResult(new OperatingConditionSummary());
-
-        public Task<DatasetReport> BuildExecutiveReportAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(new DatasetReport());
-
-        public Task<IReadOnlyList<AnalysisExample>> GetAnalysisExamplesAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<AnalysisExample>>(Array.Empty<AnalysisExample>());
     }
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler
