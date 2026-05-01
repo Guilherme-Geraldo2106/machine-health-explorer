@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MachineHealthExplorer.Agent.Models;
 
 namespace MachineHealthExplorer.Agent.MultiAgent;
@@ -12,7 +13,10 @@ internal static class SpecialistDatasetEvidencePolicy
         AgentEvidenceKind.RowSample
     ];
 
-    private static readonly HashSet<string> StructuralTools = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// Tools that can contribute structural evidence when the schema is still unknown.
+    /// </summary>
+    internal static readonly HashSet<string> StructuralDiscoveryToolNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "describe_dataset",
         "get_schema",
@@ -68,9 +72,21 @@ internal static class SpecialistDatasetEvidencePolicy
                 continue;
             }
 
-            if (StructuralTools.Contains(execution.ToolName))
+            if (string.Equals(execution.ToolName, "search_columns", StringComparison.OrdinalIgnoreCase))
+            {
+                if (SearchColumnsHasUsefulStructuralMatches(execution.ResultJson))
+                {
+                    set.Add(AgentEvidenceKind.StructuralSchema);
+                }
+
+                continue;
+            }
+
+            if (string.Equals(execution.ToolName, "get_schema", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(execution.ToolName, "describe_dataset", StringComparison.OrdinalIgnoreCase))
             {
                 set.Add(AgentEvidenceKind.StructuralSchema);
+                continue;
             }
 
             if (string.Equals(execution.ToolName, "profile_columns", StringComparison.OrdinalIgnoreCase))
@@ -132,7 +148,8 @@ internal static class SpecialistDatasetEvidencePolicy
 
     public static IReadOnlyList<AgentToolDefinition> FilterToolsSatisfyingAnyKind(
         IReadOnlyList<AgentToolDefinition> catalog,
-        IReadOnlyList<AgentEvidenceKind> kinds)
+        IReadOnlyList<AgentEvidenceKind> kinds,
+        IReadOnlyList<AgentToolExecutionRecord>? executions = null)
     {
         if (kinds.Count == 0)
         {
@@ -148,7 +165,7 @@ internal static class SpecialistDatasetEvidencePolicy
         var list = new List<AgentToolDefinition>();
         foreach (var tool in catalog)
         {
-            if (wantStructural && StructuralTools.Contains(tool.Name))
+            if (wantStructural && StructuralDiscoveryToolNames.Contains(tool.Name))
             {
                 list.Add(tool);
                 continue;
@@ -178,6 +195,80 @@ internal static class SpecialistDatasetEvidencePolicy
             }
         }
 
+        if (executions is not null
+            && wantAgg
+            && !GetSatisfiedEvidenceKinds(executions).Contains(AgentEvidenceKind.StructuralSchema))
+        {
+            var names = new HashSet<string>(list.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
+            foreach (var tool in catalog)
+            {
+                if (StructuralDiscoveryToolNames.Contains(tool.Name) && names.Add(tool.Name))
+                {
+                    list.Add(tool);
+                }
+            }
+        }
+
         return list.Count > 0 ? list : catalog;
+    }
+
+    /// <summary>
+    /// When the planner narrows the exposed tool list to aggregate-only but schema/columns are not yet evidenced,
+    /// merge structural discovery tools from the specialist allowlist so the model can run get_schema/search_columns first.
+    /// </summary>
+    public static IReadOnlyList<AgentToolDefinition> EnsureStructuralSurfaceWhenSchemaUnsatisfied(
+        IReadOnlyList<AgentToolDefinition> scopedCatalog,
+        IReadOnlyList<AgentToolDefinition> chosenForTurn,
+        IReadOnlyList<AgentEvidenceKind> missingKinds,
+        IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        if (GetSatisfiedEvidenceKinds(executions).Contains(AgentEvidenceKind.StructuralSchema))
+        {
+            return chosenForTurn;
+        }
+
+        var mustExposeStructural =
+            missingKinds.Contains(AgentEvidenceKind.StructuralSchema)
+            || missingKinds.Contains(AgentEvidenceKind.Aggregate);
+        if (!mustExposeStructural)
+        {
+            return chosenForTurn;
+        }
+
+        var names = new HashSet<string>(chosenForTurn.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
+        var merged = chosenForTurn.ToList();
+        foreach (var tool in scopedCatalog)
+        {
+            if (StructuralDiscoveryToolNames.Contains(tool.Name) && names.Add(tool.Name))
+            {
+                merged.Add(tool);
+            }
+        }
+
+        return merged;
+    }
+
+    private static bool SearchColumnsHasUsefulStructuralMatches(string? resultJson)
+    {
+        if (string.IsNullOrWhiteSpace(resultJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(resultJson);
+            if (!document.RootElement.TryGetProperty("matches", out var matches)
+                || matches.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            return matches.GetArrayLength() > 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

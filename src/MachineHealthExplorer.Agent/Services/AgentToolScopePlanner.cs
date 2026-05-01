@@ -47,9 +47,9 @@ Return ONLY JSON with this exact shape:
 Rules:
 - Do not invent tool names.
 - If the user is asking for interpretation/meaning and the transcript already includes tool evidence, prefer need_tools=false.
-- If the user needs new factual dataset values (counts, min/max/mean, filters, column discovery, failures, torque/temperature, etc.), set need_tools=true and include only necessary tools.
-- In "reason", name a specific dataset column only if the user or transcript already identified it; do not guess between similar columns (e.g. air vs process temperature).
-- When the user asks for a generic "temperature" extremum and the transcript shows multiple temperature columns (often after describe_dataset), keep need_tools=true and prefer tools that let the assistant compute extrema per column (e.g. query_rows with sortRules and pageSize=1) without assuming which column applies.
+- If the user needs new factual dataset values (counts, min/max/mean, filters, column discovery, labels/events, etc.), set need_tools=true and include only necessary tools.
+- In "reason", name a specific dataset column only if the user or transcript already identified it; do not guess between similarly named columns when multiple exist.
+- When the transcript shows multiple plausible numeric columns for the same concept (often after describe_dataset), keep need_tools=true and prefer tools that let the assistant compute extrema per column (e.g. query_rows with sortRules and pageSize=1) without assuming which column applies.
 """;
 
         var userPrompt = $"""

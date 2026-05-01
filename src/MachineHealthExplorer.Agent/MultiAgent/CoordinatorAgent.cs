@@ -183,7 +183,7 @@ Your job is routing only: decide which specialist agents must run next.
 
 Specialists (pick the minimum necessary set; specialists can run in parallel when independent):
 - Discovery: structural context (schema/columns/types/distinct/profile).
-- QueryAnalysis: quantitative queries (filters, aggregates, extrema, subset comparisons, failure rates by numeric bins via group_and_aggregate).
+- QueryAnalysis: quantitative queries (filters, aggregates, extrema, subset comparisons, grouped rates via numeric bins using group_and_aggregate).
 - FailureAnalysis: same generic tools as QueryAnalysis; do NOT schedule it together with QueryAnalysis for the same quantitative question (pick one — almost always QueryAnalysis).
 - Reporting: internal structured reports / executive synthesis / reusable analysis examples.
 

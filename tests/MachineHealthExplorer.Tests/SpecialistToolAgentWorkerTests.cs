@@ -624,6 +624,194 @@ public sealed class SpecialistToolAgentWorkerTests
             => Task.FromResult<IReadOnlyList<string>>(["m"]);
     }
 
+    [Fact]
+    public async Task Regression_PortugueseCombinationStub_SearchThenSchemaThenAggregate()
+    {
+        var options = new AgentOptions
+        {
+            Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
+            EnableStructuredJsonOutputs = true,
+            UseStrictJsonSchemaInResponseFormat = false,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 10,
+                SpecialistMaxStructuralEvidenceRecoveryUserTurns = 2,
+                SpecialistRecoveryPreferToolChoiceRequired = false
+            }
+        };
+
+        var runtime = new SearchSchemaAggregateRuntime();
+        var chat = new QueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall
+                    {
+                        Id = "a",
+                        Name = "search_columns",
+                        ArgumentsJson = """{"keyword":"stub"}"""
+                    }
+                ]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls = [new AgentToolCall { Id = "b", Name = "get_schema", ArgumentsJson = "{}" }]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall
+                    {
+                        Id = "c",
+                        Name = "group_and_aggregate",
+                        ArgumentsJson =
+                            """{"aggregations":[{"alias":"row_count","function":"Count"}],"pageSize":50}"""
+                    }
+                ]
+            },
+            new AgentModelResponse { Model = "m", Content = string.Empty, FinishReason = "stop", ToolCalls = [] },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content =
+                    """
+                    {"relevantColumns":["c1"],"ambiguities":[],"evidences":[{"sourceTool":"group_and_aggregate","summary":"ok","supportingJsonFragment":null}],"keyMetrics":{"row_count":1},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}
+                    """,
+                FinishReason = "stop"
+            });
+
+        var worker = new SpecialistToolAgentWorker(options, runtime, chat, NullLogger.Instance);
+        var request = new AgentTaskRequest(
+            AgentSpecialistKind.QueryAnalysis,
+            "qual a combinação de fator que voce considera maior causador de falhas e desgaste na maquina ?",
+            "dispatch",
+            new AgentConversationMemory(),
+            Array.Empty<AgentConversationMessage>(),
+            runtime.GetTools(),
+            "m",
+            MultiAgentPromptBuilder.BuildSpecialistSystemPrompt(AgentSpecialistKind.QueryAnalysis, options),
+            RequiredEvidenceKinds:
+            [
+                AgentEvidenceKind.StructuralSchema,
+                AgentEvidenceKind.Aggregate
+            ]);
+
+        var result = await worker.ExecuteAsync(request, CancellationToken.None);
+
+        Assert.Contains(
+            result.ToolExecutions,
+            e => e.ToolName.Equals("search_columns", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(
+            result.ToolExecutions,
+            e => e.ToolName.Equals("get_schema", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(
+            result.ToolExecutions,
+            e => e.ToolName.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void OutOfSurfaceToolResultJson_IncludesValidationPayload()
+    {
+        var exposed = new List<AgentToolDefinition>
+        {
+            new()
+            {
+                Name = "group_and_aggregate",
+                ParametersJsonSchema = """{"type":"object"}"""
+            }
+        };
+        var scoped = new List<AgentToolDefinition>
+        {
+            new()
+            {
+                Name = "get_schema",
+                ParametersJsonSchema = """{"type":"object","additionalProperties":false}"""
+            },
+            exposed[0]
+        };
+
+        var json = SpecialistToolSurfaceValidation.BuildOutOfSurfaceToolResultJson(
+            "get_schema",
+            exposed,
+            scoped,
+            useFullToolSchemas: true);
+
+        Assert.Contains("tool_not_on_exposed_surface", json, StringComparison.Ordinal);
+        Assert.Contains("group_and_aggregate", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class SearchSchemaAggregateRuntime : IAgentToolRuntime
+    {
+        public IReadOnlyList<AgentToolDefinition> GetTools()
+            =>
+            [
+                new AgentToolDefinition
+                {
+                    Name = "search_columns",
+                    Description = "search",
+                    ParametersJsonSchema =
+                        """{"type":"object","properties":{"keyword":{"type":"string"}},"required":["keyword"],"additionalProperties":false}"""
+                },
+                new AgentToolDefinition
+                {
+                    Name = "get_schema",
+                    Description = "schema",
+                    ParametersJsonSchema = """{"type":"object","additionalProperties":false}"""
+                },
+                new AgentToolDefinition
+                {
+                    Name = "group_and_aggregate",
+                    Description = "agg",
+                    ParametersJsonSchema = """{"type":"object","additionalProperties":false}"""
+                }
+            ];
+
+        public Task<AgentToolExecutionRecord> ExecuteAsync(string toolName, string argumentsJson, CancellationToken cancellationToken = default)
+        {
+            if (toolName.Equals("search_columns", StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromResult(
+                    new AgentToolExecutionRecord
+                    {
+                        ToolName = toolName,
+                        ArgumentsJson = argumentsJson,
+                        ResultJson = """{"keyword":"stub","matches":[]}"""
+                    });
+            }
+
+            if (toolName.Equals("get_schema", StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromResult(
+                    new AgentToolExecutionRecord
+                    {
+                        ToolName = toolName,
+                        ArgumentsJson = argumentsJson,
+                        ResultJson =
+                            """{"datasetName":"stub","rowCount":100,"generatedAtUtc":"2020-01-01T00:00:00Z","columns":[{"name":"col_a","dataType":"Double","isNullable":false,"isNumeric":true,"isCategorical":false},{"name":"flag_b","dataType":"Boolean","isNullable":false,"isNumeric":false,"isCategorical":true}]}"""
+                    });
+            }
+
+            return Task.FromResult(
+                new AgentToolExecutionRecord
+                {
+                    ToolName = toolName,
+                    ArgumentsJson = argumentsJson,
+                    ResultJson = """{"rows":[{"values":{"row_count":10}}],"aggregations":[]}"""
+                });
+        }
+    }
+
     private sealed class SchemaThenAggregateRuntime : IAgentToolRuntime
     {
         public IReadOnlyList<AgentToolDefinition> GetTools()

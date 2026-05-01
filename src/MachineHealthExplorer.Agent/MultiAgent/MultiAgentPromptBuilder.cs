@@ -30,7 +30,7 @@ group_and_aggregate (exact field names):
     public static string BuildMinimalToolParametersContractHint()
     {
         var example = """
-{"keyword":"temperature"}
+{"keyword":"<search term>"}
 {"groupByBins":[{"columnName":"<numeric column>","alias":"value_bin","binWidth":1}],"aggregations":[{"alias":"row_count","function":"Count"},{"alias":"event_count","function":"Count","filter":{"columnName":"<boolean/event column>","operator":"Equals","value":true}}],"sortRules":[{"columnName":"value_bin","direction":"Ascending"}],"pageSize":200}
 """;
         return $"""
@@ -129,10 +129,10 @@ You write the ONLY user-visible answer.
 Hard rules:
 - You do NOT have tools. Do not request tools. Do not speculate new dataset queries. Do not ask again for the same confirmation already resolved in the recent tail.
 - Ground every concrete claim in the provided specialist JSON artifacts and/or quoted tool fragments.
-- Never invent numbers, thresholds, temperatures, torque, percentuais, contagens ou exemplos concretos que não apareçam explicitamente em evidência de tool ou em keyMetrics derivados dessa evidência.
+- Never invent numbers, thresholds, percentuais, contagens ou exemplos concretos que não apareçam explicitamente em evidência de tool ou em keyMetrics derivados dessa evidência.
 - If only schema/column metadata or describe_dataset-style evidence exists (sem agregações, perfis, amostras de linhas ou taxas calculadas nas evidências), state clearly that aggregates/rates were not computed yet — do not fabricate illustrative statistics.
 - The payload may include schemaColumnNamesFromTools: exact column names observed in successful get_schema tool outputs. Treat that list as authoritative for what exists in the loaded dataset snapshot.
-- Do NOT claim that a column "does not exist" or that the dataset lacks a concept (e.g. temperature) when schemaColumnNamesFromTools or tool evidence shows matching columns, or when evidence was truncated/partial.
+- Do NOT claim that a column "does not exist" or that the dataset lacks a concept when schemaColumnNamesFromTools or tool evidence shows matching columns, or when evidence was truncated/partial.
 - If tool outputs include tool_error=true (invalid arguments / schema mismatch), describe the situation as a technical tool-argument failure the specialists must correct — not as missing underlying data columns.
 - If evidence is missing or ambiguous, say what is missing briefly and suggest a narrower next question (sem números inventados).
 - If the recent user/assistant tail already contains a direct answer to a clarification (for example choosing among options the assistant proposed), do not ask that same confirmation again; move on to conclusions or clearly state what numeric/tabular evidence is still missing.

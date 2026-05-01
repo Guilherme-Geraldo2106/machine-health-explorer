@@ -155,6 +155,115 @@ public sealed class EvidencePolicyAndCoordinatorTests
     }
 
     [Fact]
+    public void SpecialistDatasetEvidencePolicy_SearchColumnsEmpty_DoesNotSatisfyStructuralSchema()
+    {
+        var executions = new[]
+        {
+            new AgentToolExecutionRecord
+            {
+                ToolName = "search_columns",
+                ArgumentsJson = """{"keyword":"x"}""",
+                ResultJson = """{"keyword":"x","matches":[]}""",
+                IsError = false
+            }
+        };
+
+        var kinds = SpecialistDatasetEvidencePolicy.GetSatisfiedEvidenceKinds(executions);
+        Assert.DoesNotContain(AgentEvidenceKind.StructuralSchema, kinds);
+    }
+
+    [Fact]
+    public void SpecialistDatasetEvidencePolicy_SearchColumnsWithMatches_SatisfiesStructuralSchema()
+    {
+        var executions = new[]
+        {
+            new AgentToolExecutionRecord
+            {
+                ToolName = "search_columns",
+                ArgumentsJson = """{"keyword":"x"}""",
+                ResultJson = """{"keyword":"x","matches":[{"columnName":"c1","matchReason":"n"}]}""",
+                IsError = false
+            }
+        };
+
+        var kinds = SpecialistDatasetEvidencePolicy.GetSatisfiedEvidenceKinds(executions);
+        Assert.Contains(AgentEvidenceKind.StructuralSchema, kinds);
+    }
+
+    [Fact]
+    public void SpecialistDatasetEvidencePolicy_MissingStructuralAndAggregate_ImpliesStructuralDiscoveryToolsInFilteredCatalog()
+    {
+        var catalog = new AgentToolDefinition[]
+        {
+            new() { Name = "get_schema", Description = "s", ParametersJsonSchema = "{}" },
+            new() { Name = "search_columns", Description = "s", ParametersJsonSchema = "{}" },
+            new() { Name = "group_and_aggregate", Description = "s", ParametersJsonSchema = "{}" }
+        };
+
+        var executions = new[]
+        {
+            new AgentToolExecutionRecord
+            {
+                ToolName = "search_columns",
+                ResultJson = """{"matches":[]}""",
+                IsError = false
+            }
+        };
+
+        var request = new AgentTaskRequest(
+            AgentSpecialistKind.QueryAnalysis,
+            "q",
+            "r",
+            new AgentConversationMemory(),
+            Array.Empty<AgentConversationMessage>(),
+            Array.Empty<AgentToolDefinition>(),
+            "m",
+            "sys",
+            RequiredEvidenceKinds:
+            [
+                AgentEvidenceKind.StructuralSchema,
+                AgentEvidenceKind.Aggregate
+            ]);
+
+        var filtered = SpecialistDatasetEvidencePolicy.FilterToolsSatisfyingAnyKind(
+            catalog,
+            SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executions),
+            executions);
+
+        Assert.Contains(filtered, t => t.Name.Equals("get_schema", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(filtered, t => t.Name.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void SpecialistDatasetEvidencePolicy_EnsureStructuralSurface_MergesWhenSchemaUnsatisfied()
+    {
+        var catalog = new List<AgentToolDefinition>
+        {
+            new() { Name = "get_schema", Description = "s", ParametersJsonSchema = "{}" },
+            new() { Name = "search_columns", Description = "s", ParametersJsonSchema = "{}" },
+            new() { Name = "group_and_aggregate", Description = "s", ParametersJsonSchema = "{}" }
+        };
+
+        var chosen = new List<AgentToolDefinition> { catalog[2] };
+        var merged = SpecialistDatasetEvidencePolicy.EnsureStructuralSurfaceWhenSchemaUnsatisfied(
+            catalog,
+            chosen,
+            [AgentEvidenceKind.Aggregate],
+            Array.Empty<AgentToolExecutionRecord>());
+
+        Assert.Contains(merged, t => t.Name.Equals("get_schema", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(merged, t => t.Name.Equals("search_columns", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ProductionFinalComposerPrompt_AvoidsDomainSpecificExamples()
+    {
+        var prompt = MultiAgentPromptBuilder.BuildFinalComposerSystemPrompt(new AgentOptions());
+        Assert.DoesNotContain("temperature", prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("torque", prompt, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void SpecialistWorker_DoesNotHardcodeColumnNamesInRecoveryPrompt()
     {
         var request = new AgentTaskRequest(

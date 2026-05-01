@@ -101,7 +101,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             var missingEvidenceKinds = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
             var explicitEvidencePlan = request.RequiredEvidenceKinds is { Count: > 0 };
             var narrowedCatalog = explicitEvidencePlan
-                ? SpecialistDatasetEvidencePolicy.FilterToolsSatisfyingAnyKind(scopedTools, missingEvidenceKinds)
+                ? SpecialistDatasetEvidencePolicy.FilterToolsSatisfyingAnyKind(scopedTools, missingEvidenceKinds, executedTools)
                 : scopedTools;
             var toolsForTurn = explicitEvidencePlan
                                && narrowedCatalog.Count > 0
@@ -263,6 +263,12 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     plannerUsedSuccessfulSubset,
                     catalogToolNames);
             }
+
+            toolsExposedForModelTurn = SpecialistDatasetEvidencePolicy.EnsureStructuralSurfaceWhenSchemaUnsatisfied(
+                scopedTools,
+                toolsExposedForModelTurn,
+                missingEvidenceKinds,
+                executedTools);
 
             var estimatedPrompt = AgentContextBudgetEstimator.EstimatePromptTokens(
                 _options,
@@ -480,10 +486,29 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             }
 
             model = string.IsNullOrWhiteSpace(response.Model) ? model : response.Model;
-            response = FilterToolCallsToKnownCatalog(response, toolsExposedForModelTurn);
             lastToolTurnUsage = response.Usage;
 
-            if (response.ToolCalls.Count > 0)
+            var exposedSurfaceNames = new HashSet<string>(
+                toolsExposedForModelTurn.Select(t => t.Name),
+                StringComparer.OrdinalIgnoreCase);
+            var scopedSurfaceNames = new HashSet<string>(
+                scopedTools.Select(t => t.Name),
+                StringComparer.OrdinalIgnoreCase);
+            var scopedCalls = response.ToolCalls
+                .Where(c => scopedSurfaceNames.Contains(c.Name))
+                .ToArray();
+
+            if (response.ToolCalls.Count > 0
+                && scopedCalls.Length == 0)
+            {
+                _logger.LogWarning(
+                    "Specialist {Specialist} iteration={Iteration} dropped_raw_tool_calls_not_in_specialist_allowlist names=[{Names}]",
+                    kind,
+                    iteration,
+                    string.Join(", ", response.ToolCalls.Select(c => c.Name)));
+            }
+
+            if (scopedCalls.Length > 0)
             {
                 requireToolCallNextTurn = false;
                 plannerSuppressedForLengthRecovery = false;
@@ -493,13 +518,56 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 {
                     Role = AgentConversationRole.Assistant,
                     Content = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content),
-                    ToolCalls = response.ToolCalls
+                    ToolCalls = scopedCalls
                 });
 
-                foreach (var toolCall in response.ToolCalls)
+                foreach (var toolCall in scopedCalls)
                 {
                     var sw = Stopwatch.StartNew();
-                    var execution = await scopedRuntime.ExecuteAsync(toolCall.Name, toolCall.ArgumentsJson, cancellationToken).ConfigureAwait(false);
+                    AgentToolExecutionRecord execution;
+                    if (!exposedSurfaceNames.Contains(toolCall.Name))
+                    {
+                        _logger.LogWarning(
+                            "Specialist {Specialist} iteration={Iteration} tool_call_rejected_not_on_exposed_surface requested={Tool} exposed=[{Exposed}]",
+                            kind,
+                            iteration,
+                            toolCall.Name,
+                            string.Join(", ", toolsExposedForModelTurn.Select(t => t.Name)));
+
+                        _chatSessionLogger.Append(new ChatSessionLogEvent(
+                            default,
+                            string.Empty,
+                            "agent.tool_call.rejected",
+                            "internal",
+                            model,
+                            response.FinishReason,
+                            null,
+                            null,
+                            null,
+                            null,
+                            $"requested={toolCall.Name}; exposed=[{string.Join(',', toolsExposedForModelTurn.Select(t => t.Name))}]"));
+
+                        execution = new AgentToolExecutionRecord
+                        {
+                            ToolName = toolCall.Name,
+                            ArgumentsJson = toolCall.ArgumentsJson ?? "{}",
+                            IsError = true,
+                            ResultJson = SpecialistToolSurfaceValidation.BuildOutOfSurfaceToolResultJson(
+                                toolCall.Name,
+                                toolsExposedForModelTurn,
+                                scopedTools,
+                                request.UseFullToolSchemas)
+                        };
+                    }
+                    else
+                    {
+                        execution = await scopedRuntime.ExecuteAsync(
+                                toolCall.Name,
+                                toolCall.ArgumentsJson ?? "{}",
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
                     sw.Stop();
                     executedTools.Add(execution);
                     var originalLen = (execution.ResultJson ?? string.Empty).Length;
@@ -521,7 +589,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                         kind,
                         execution.ToolName,
                         execution.IsError,
-                        toolCall.ArgumentsJson.Length,
+                        (toolCall.ArgumentsJson ?? "{}").Length,
                         originalLen,
                         preview.Length,
                         sw.Elapsed.TotalMilliseconds);
@@ -540,7 +608,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                         null,
                         ToolExecution: new ChatToolExecutionLog(
                             execution.ToolName,
-                            toolCall.ArgumentsJson.Length,
+                            (toolCall.ArgumentsJson ?? "{}").Length,
                             originalLen,
                             preview.Length,
                             execution.IsError,
@@ -1190,24 +1258,5 @@ If tool outputs were partial or conflicting, record that in ambiguities and hypo
 
         var text = builder.ToString();
         return text.Length <= maxChars ? text : string.Concat(text.AsSpan(0, maxChars), "…");
-    }
-
-    private static AgentModelResponse FilterToolCallsToKnownCatalog(
-        AgentModelResponse response,
-        IReadOnlyList<AgentToolDefinition> catalogTools)
-    {
-        if (response.ToolCalls.Count == 0)
-        {
-            return response;
-        }
-
-        var known = new HashSet<string>(catalogTools.Select(tool => tool.Name), StringComparer.OrdinalIgnoreCase);
-        var filtered = response.ToolCalls.Where(call => known.Contains(call.Name)).ToArray();
-        if (filtered.Length == response.ToolCalls.Count)
-        {
-            return response;
-        }
-
-        return response with { ToolCalls = filtered };
     }
 }
