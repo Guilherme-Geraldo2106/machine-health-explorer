@@ -6,23 +6,23 @@ internal static class MultiAgentPromptBuilder
 {
     private const string GroupAndAggregateParameterContract = """
 group_and_aggregate (exact field names):
-- "groupByBins" MUST be a JSON array of objects; each object requires "columnName", "alias", and "binWidth" (number > 0).
-- "aggregations" is an array; each item requires "alias" and "function" (e.g. Count). Optional per-aggregation "filter" object for conditional counts.
-- "sortRules" is an array of { "columnName": "...", "direction": "Ascending"|"Descending" } — columnName may reference a bin alias.
+- "groupByBins" MUST be a JSON array of objects; each object requires "columnName", "alias", and "binWidth" (number > 0). Bins are numeric bands only; nothing in the tool marks a band as special.
+- "aggregations" is an array; each item requires "alias" and "function" (e.g. Count). Count with no per-aggregation "filter" counts every row in the group; Count with "filter" counts only rows matching that filter (same group keys). Different aggregations can mix filtered and unfiltered Count (e.g. aliases row_count vs event_count).
+- "sortRules" is an array of { "columnName": "...", "direction": "Ascending"|"Descending" } — columnName may reference a bin alias or an aggregation alias.
 """;
 
     public static string BuildMinimalToolParametersContractHint()
     {
         var example = """
 {"keyword":"temperature"}
-{"groupByBins":[{"columnName":"<numeric column>","alias":"temp_bin","binWidth":1}],"aggregations":[{"alias":"row_count","function":"Count"},{"alias":"failure_count","function":"Count","filter":{"columnName":"<boolean column>","operator":"Equals","value":true}}],"sortRules":[{"columnName":"temp_bin","direction":"Ascending"}],"pageSize":200}
+{"groupByBins":[{"columnName":"<numeric column>","alias":"value_bin","binWidth":1}],"aggregations":[{"alias":"row_count","function":"Count"},{"alias":"event_count","function":"Count","filter":{"columnName":"<boolean/event column>","operator":"Equals","value":true}}],"sortRules":[{"columnName":"value_bin","direction":"Ascending"}],"pageSize":200}
 """;
         return $"""
 Tool JSON schemas were reduced for context limits. Use these exact field names and shapes:
 
 - search_columns: single string field "keyword" (not "keywords").
 {GroupAndAggregateParameterContract.Trim()}
-Example (illustrative column names only):
+Example (placeholders — replace with real column names from schema):
 {example.Trim()}
 """;
     }
@@ -70,7 +70,7 @@ Rules:
 - Do not write the final user-facing answer.
 - Resolve exact column names with search_columns and/or get_schema before aggregates.
 - For histograms or numeric bands, use group_and_aggregate with groupByBins as an array of objects; each bin spec needs columnName, alias, and binWidth.
-- Aggregations: use function names exactly as exposed by tools (e.g. Count). Conditional counts use per-aggregation filter objects.
+- Aggregations: use function names exactly as exposed by tools (e.g. Count). Count without a per-aggregation filter is group row count; add a filter on that aggregation for conditional/subset counts (same grouping, different aliases such as row_count vs event_count).
 - sortRules.columnName may reference a bin alias from groupByBins.
 - Tools return tabular facts only; never encode conclusions, thresholds, or "critical" values in tool arguments.
 - On tool-enabled turns, emit the next tool_calls entry immediately; reserve longer explanation for the non-tool synthesis pass only.
@@ -122,7 +122,7 @@ Hard rules:
 - Match the user's language preference when obvious; otherwise follow the detected language hint from the payload.
 - When detectedLanguage is 'pt', write the final answer in Portuguese.
 - Be concise, structured, and practical.
-- When evidence includes paired counts such as failure_count and row_count, clearly distinguish absolute counts from rates (failure_rate = failure_count / row_count when both are present).
+- When evidence includes paired counts such as event_count and row_count, clearly distinguish absolute counts from rates (e.g. event_count / row_count when both are present).
 
 Output:
 - Normal assistant prose only (no JSON, no markdown code fences unless the user explicitly asked for code).

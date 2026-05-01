@@ -109,7 +109,7 @@ internal sealed class CoordinatorAgent
             }
 
             var surface = AgentToolScopePlanner.CombinePlannerSurface(response.Content, response.ReasoningContent);
-            if (TryParsePlanDetailed(surface, multi, out var plan, out var parseError) && plan.Steps.Count > 0)
+            if (TryParsePlanDetailed(surface, multi, out var plan, out var parseError))
             {
                 plan = MultiAgentDispatchHeuristics.PostNormalizeDispatchPlan(userInput, plan, multi);
                 LogPlan(plan, userInput);
@@ -295,15 +295,13 @@ Return ONLY the JSON dispatch plan for specialists.
                     expectsDatasetQueryEvidence));
             }
 
-            if (steps.Count == 0)
+            var notes = root.TryGetProperty("notes", out var notesElement) ? ReadString(notesElement) : string.Empty;
+            if (steps.Count == 0 && skipped > 0)
             {
-                failureDetail = skipped > 0
-                    ? $"No enabled specialist steps parsed ({skipped} step entries were invalid or disabled)."
-                    : "The 'steps' array was empty.";
+                failureDetail = $"No enabled specialist steps parsed ({skipped} step entries were invalid or disabled).";
                 return false;
             }
 
-            var notes = root.TryGetProperty("notes", out var notesElement) ? ReadString(notesElement) : string.Empty;
             plan = new AgentDispatchPlan(steps, notes, UsedLlmPlanner: true);
             return true;
         }

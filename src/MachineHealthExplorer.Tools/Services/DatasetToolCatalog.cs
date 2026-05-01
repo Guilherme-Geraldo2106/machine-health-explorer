@@ -45,11 +45,15 @@ public sealed class DatasetToolCatalog : IDatasetToolCatalog
         {
             Name = "group_and_aggregate",
             Description =
-                "Groups rows by explicit columns and/or numeric histogram bins (bucket lower = floor(value/binWidth)*binWidth), then computes aggregations (count, sum, etc.) with optional per-aggregation filters.",
+                "Groups rows by explicit columns and/or numeric histogram bins (bucket lower = floor(value/binWidth)*binWidth), then computes aggregations (count, sum, etc.). " +
+                "Semantics: Count with no per-aggregation filter counts every row in the group (total group size). " +
+                "To count only a subset (events, flags, labels), use Count on the same grouping with a per-aggregation filter; pick the filter column from the schema. " +
+                "Common pattern: alias row_count = Count without filter; alias event_count = Count with a filter on a boolean/categorical column the model selects from the schema. " +
+                "groupByBins only builds numeric ranges; it does not interpret which range is important.",
             InputHints = ["GroupAggregationRequest"],
             ExamplePrompts =
             [
-                "Count rows and conditional counts per 1-unit bins of a numeric column.",
+                "Per numeric-bin band: total rows (Count, no filter) and conditional Count with a filter on the same grouping.",
                 "Group by two categorical columns and compute averages."
             ]
         },

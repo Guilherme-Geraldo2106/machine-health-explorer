@@ -136,6 +136,16 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
             additionalProperties = true
         };
 
+        var aggregationFilterSchema = new
+        {
+            type = "object",
+            description =
+                "Optional filter applied only while computing this aggregation (other aggregations in the same request are unaffected). " +
+                "Use this to combine an unfiltered row Count (group size) with a filtered Count (subset/event/label count) in one grouping. " +
+                "Omit this field for Count to include every row in the group.",
+            additionalProperties = true
+        };
+
         var sortRuleSchema = new
         {
             type = "object",
@@ -169,14 +179,15 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                 columnName = new
                 {
                     type = "string",
-                    description = "Dataset column to aggregate. Leave empty for count."
+                    description =
+                        "Source column for non-Count functions. For Count, omit; counting uses group rows, narrowed only by this aggregation's optional filter (not by a column value)."
                 },
                 function = new
                 {
                     type = "string",
                     @enum = Enum.GetNames<AggregateFunction>()
                 },
-                filter = filterSchema
+                filter = aggregationFilterSchema
             },
             required = new[] { "alias", "function" },
             additionalProperties = false
@@ -252,6 +263,9 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
             ["group_and_aggregate"] = SerializeSchema(new
             {
                 type = "object",
+                description =
+                    "Tabular group-by with aggregations. Count without a per-aggregation filter counts all rows in each group; add a per-aggregation filter on Count to count only rows matching that predicate (e.g. row_count vs event_count in one call). " +
+                    "groupByBins only assigns numeric bucket labels; it does not mark any bucket as critical.",
                 properties = new
                 {
                     groupByColumns = stringArraySchema,
@@ -259,7 +273,8 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                     {
                         type = "array",
                         description =
-                            "Optional numeric histogram dimensions. Bucket lower bound = floor(value/binWidth)*binWidth; upper bound (exclusive) is lower+binWidth (not returned as a column).",
+                            "Optional numeric histogram dimensions. Bucket lower bound = floor(value/binWidth)*binWidth; upper bound (exclusive) is lower+binWidth (not returned as a column). " +
+                            "Bins are neutral numeric ranges only; this tool does not interpret business importance of any range.",
                         items = new
                         {
                             type = "object",
@@ -290,6 +305,8 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                     aggregations = new
                     {
                         type = "array",
+                        description =
+                            "One object per output metric. Each aggregation may carry its own filter so different metrics can share the same group keys (e.g. unfiltered Count plus filtered Count).",
                         items = aggregationSchema
                     },
                     filter = filterSchema,

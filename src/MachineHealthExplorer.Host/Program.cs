@@ -41,8 +41,7 @@ var agentOptions = builder.Configuration.GetSection("Agent").Get<AgentOptions>()
 var chatSessionLoggingOptions = builder.Configuration.GetSection(ChatSessionLoggingOptions.SectionName).Get<ChatSessionLoggingOptions>() ?? new ChatSessionLoggingOptions();
 if (string.IsNullOrWhiteSpace(chatSessionLoggingOptions.LogsDirectory))
 {
-    chatSessionLoggingOptions.LogsDirectory = Path.GetFullPath(
-        Path.Combine(builder.Environment.ContentRootPath, "..", "MachineHealthExplorer.Logging", "logs"));
+    chatSessionLoggingOptions.LogsDirectory = ResolveDefaultChatLogsDirectory(builder.Environment.ContentRootPath);
 }
 
 builder.Services.AddSingleton(datasetOptions);
@@ -69,3 +68,43 @@ builder.Services.AddSingleton<IAgentOrchestrator, LmStudioAgentOrchestrator>();
 builder.Services.AddHostedService<ConsoleHostedService>();
 
 await builder.Build().RunAsync().ConfigureAwait(false);
+
+static string ResolveDefaultChatLogsDirectory(string contentRootPath)
+{
+    foreach (var startPath in new[]
+             {
+                 contentRootPath,
+                 AppContext.BaseDirectory,
+                 Directory.GetCurrentDirectory()
+             })
+    {
+        var solutionRoot = FindSolutionRoot(startPath);
+        if (solutionRoot is not null)
+        {
+            return Path.GetFullPath(Path.Combine(solutionRoot, "src", "MachineHealthExplorer.Logging", "logs"));
+        }
+    }
+
+    return Path.GetFullPath(Path.Combine(contentRootPath, "..", "MachineHealthExplorer.Logging", "logs"));
+}
+
+static string? FindSolutionRoot(string? startPath)
+{
+    if (string.IsNullOrWhiteSpace(startPath))
+    {
+        return null;
+    }
+
+    var directory = new DirectoryInfo(Path.GetFullPath(startPath));
+    while (directory is not null)
+    {
+        if (File.Exists(Path.Combine(directory.FullName, "MachineHealthExplorer.slnx")))
+        {
+            return directory.FullName;
+        }
+
+        directory = directory.Parent;
+    }
+
+    return null;
+}

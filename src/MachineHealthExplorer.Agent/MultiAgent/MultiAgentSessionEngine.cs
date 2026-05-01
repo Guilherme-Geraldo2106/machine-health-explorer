@@ -49,14 +49,12 @@ internal sealed class MultiAgentSessionEngine
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var availableTools = await DescribeToolsAsync(cancellationToken).ConfigureAwait(false);
-        var model = await ResolveModelAsync(cancellationToken).ConfigureAwait(false);
-
         var memory = context.ConversationMemory ?? new AgentConversationMemory();
+        var detectedLanguage = LanguageHeuristics.DetectLanguage(context.UserInput, memory.LanguagePreference);
         memory = memory with
         {
             CurrentUserIntent = string.IsNullOrWhiteSpace(context.UserInput) ? memory.CurrentUserIntent : context.UserInput.Trim(),
-            LanguagePreference = LanguageHeuristics.DetectLanguage(context.UserInput, memory.LanguagePreference),
+            LanguagePreference = detectedLanguage,
             LastUpdatedUtc = DateTimeOffset.UtcNow
         };
 
@@ -66,6 +64,43 @@ internal sealed class MultiAgentSessionEngine
             Role = AgentConversationRole.User,
             Content = context.UserInput
         });
+
+        if (TryBuildDirectCasualResponse(context.UserInput, detectedLanguage, out var directMessage, out var directLanguage))
+        {
+            if (!string.IsNullOrWhiteSpace(directLanguage) && !directLanguage.Equals(memory.LanguagePreference, StringComparison.OrdinalIgnoreCase))
+            {
+                memory = memory with
+                {
+                    LanguagePreference = directLanguage,
+                    LastUpdatedUtc = DateTimeOffset.UtcNow
+                };
+            }
+
+            conversation.Add(new AgentConversationMessage
+            {
+                Role = AgentConversationRole.Assistant,
+                Content = directMessage
+            });
+
+            var tools = await DescribeToolsAsync(cancellationToken).ConfigureAwait(false);
+            return new AgentExecutionResult
+            {
+                IsImplemented = true,
+                Message = directMessage,
+                Model = _resolvedModel ?? _options.Model,
+                AvailableTools = tools,
+                UpdatedConversation = conversation.ToArray(),
+                ToolExecutions = Array.Empty<AgentToolExecutionRecord>(),
+                UpdatedConversationMemory = memory,
+                ContinuationExhausted = false,
+                MultiAgentTrace = new AgentMultiAgentExecutionTrace(
+                    new AgentDispatchPlan(Array.Empty<AgentDispatchStep>(), "direct_casual_turn", UsedLlmPlanner: false),
+                    Array.Empty<AgentSpecialistRunTrace>())
+            };
+        }
+
+        var availableTools = await DescribeToolsAsync(cancellationToken).ConfigureAwait(false);
+        var model = await ResolveModelAsync(cancellationToken).ConfigureAwait(false);
 
         memory = await MaybeCompactConversationAsync(conversation, memory, model, cancellationToken).ConfigureAwait(false);
 
@@ -144,15 +179,18 @@ internal sealed class MultiAgentSessionEngine
             }
         }
 
-        // Consolidate memory from specialist tool evidence (structured worker).
-        memory = await _workerRunner.RefreshMemoryAsync(
-                model,
-                memory,
-                context.UserInput,
-                executedTools,
-                conversation.ToArray(),
-                cancellationToken)
-            .ConfigureAwait(false);
+        if (executedTools.Count > 0 || specialistResults.Count > 0)
+        {
+            // Consolidate memory from specialist tool evidence (structured worker).
+            memory = await _workerRunner.RefreshMemoryAsync(
+                    model,
+                    memory,
+                    context.UserInput,
+                    executedTools,
+                    conversation.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var schemaColumnHints = SchemaColumnNamesFromToolExecutions.Extract(executedTools);
         var composerInput = new FinalComposerInput(
@@ -263,6 +301,67 @@ internal sealed class MultiAgentSessionEngine
     {
         var text = (json ?? string.Empty).Trim();
         return text.Length <= 220 ? text : string.Concat(text.AsSpan(0, 220), "…");
+    }
+
+    private static bool TryBuildDirectCasualResponse(
+        string? userInput,
+        string languagePreference,
+        out string message,
+        out string language)
+    {
+        message = string.Empty;
+        language = string.IsNullOrWhiteSpace(languagePreference) ? string.Empty : languagePreference.Trim();
+        var normalized = NormalizeCasualText(userInput);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        var isPortugueseGreeting = normalized is "ola" or "oi" or "bom dia" or "boa tarde" or "boa noite";
+        var isEnglishGreeting = normalized is "hello" or "hi" or "hey";
+        var isPortugueseThanks = normalized is "obrigado" or "obrigada" or "valeu";
+        var isEnglishThanks = normalized is "thanks" or "thank you" or "thx";
+
+        if (isPortugueseGreeting || isPortugueseThanks)
+        {
+            language = "pt";
+            message = isPortugueseThanks
+                ? "Por nada! Posso seguir ajudando com as analises do dataset."
+                : "Oi! Como posso ajudar a explorar o dataset de manutencao preditiva?";
+            return true;
+        }
+
+        if (isEnglishGreeting || isEnglishThanks)
+        {
+            language = string.IsNullOrWhiteSpace(language) ? "en" : language;
+            var respondInPortuguese = language.Equals("pt", StringComparison.OrdinalIgnoreCase);
+            message = isEnglishThanks
+                ? respondInPortuguese
+                    ? "Por nada! Posso seguir ajudando com as analises do dataset."
+                    : "You are welcome. I can keep helping with the dataset analysis."
+                : respondInPortuguese
+                    ? "Oi! Como posso ajudar a explorar o dataset de manutencao preditiva?"
+                    : "Hi! How can I help you explore the predictive maintenance dataset?";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string NormalizeCasualText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = text.Trim().Trim('.', ',', '!', '?', ';', ':').ToLowerInvariant();
+        while (trimmed.Contains("  ", StringComparison.Ordinal))
+        {
+            trimmed = trimmed.Replace("  ", " ", StringComparison.Ordinal);
+        }
+
+        return trimmed;
     }
 
     private static IReadOnlyList<AgentConversationMessage> BuildMinimalTranscriptTail(IReadOnlyList<AgentConversationMessage> history)

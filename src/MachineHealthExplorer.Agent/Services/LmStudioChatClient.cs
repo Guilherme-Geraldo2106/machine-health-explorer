@@ -179,8 +179,6 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
                 }
             }
 
-            responseContent = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(responseContent);
-
             _chatSessionLogger.Append(new ChatSessionLogEvent(
                 default,
                 string.Empty,

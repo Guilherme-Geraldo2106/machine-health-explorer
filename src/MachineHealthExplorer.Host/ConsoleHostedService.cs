@@ -86,6 +86,7 @@ public sealed class ConsoleHostedService : BackgroundService
     private async Task RunInteractiveLoopAsync(CancellationToken cancellationToken)
     {
         _chatSessionManager.StartNewSession();
+        PrintCurrentChatLogPath();
         while (!cancellationToken.IsCancellationRequested)
         {
             Console.Write("> ");
@@ -158,6 +159,7 @@ public sealed class ConsoleHostedService : BackgroundService
                     _conversationMemory = null;
                     _chatSessionManager.StartNewSession();
                     Console.WriteLine("Conversation history cleared and a new chat session was started.");
+                    PrintCurrentChatLogPath();
                     return Task.CompletedTask;
                 }),
             new ConsoleCommandDefinition(
@@ -178,6 +180,7 @@ public sealed class ConsoleHostedService : BackgroundService
                     await _chatSessionManager.DeleteAllLogFilesAsync(cancellationToken).ConfigureAwait(false);
                     _chatSessionManager.StartNewSession();
                     Console.WriteLine("Chat log files were deleted and a new logging session was started.");
+                    PrintCurrentChatLogPath();
                 }),
             new ConsoleCommandDefinition(
                 "highlights",
@@ -254,6 +257,15 @@ public sealed class ConsoleHostedService : BackgroundService
 
         Console.WriteLine("- exit: Stop the host.");
         Console.WriteLine("- Any other input is sent to the LM Studio agent.");
+    }
+
+    private void PrintCurrentChatLogPath()
+    {
+        var session = _chatSessionManager.CurrentSession;
+        if (session is not null)
+        {
+            Console.WriteLine($"Chat log JSONL: {session.LogFilePath}");
+        }
     }
 
     private async Task PrintDatasetHighlightsAsync(CancellationToken cancellationToken)

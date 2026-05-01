@@ -58,6 +58,26 @@ public sealed record MultiAgentOrchestrationOptions
     /// </summary>
     public bool SpecialistRecoveryPreferToolChoiceRequired { get; init; } = true;
     /// <summary>
+    /// When false, backends that reject <c>tool_choice=required</c> will not receive forced tool calls on recovery turns.
+    /// </summary>
+    public bool SpecialistProviderSupportsToolChoiceRequired { get; init; } = true;
+    /// <summary>
+    /// When true, each specialist tool-enabled turn first runs a compact JSON planner (no tool schemas) to shrink the exposed tool surface.
+    /// </summary>
+    public bool EnableSpecialistToolSelectionPlanning { get; init; } = true;
+    /// <summary>
+    /// Max output tokens for the specialist tool-selection planner (JSON only).
+    /// </summary>
+    public int SpecialistToolSelectionPlannerMaxOutputTokens { get; init; } = 320;
+    /// <summary>
+    /// Max output tokens for planner retries after invalid or truncated JSON.
+    /// </summary>
+    public int SpecialistToolSelectionPlannerRecoveryMaxOutputTokens { get; init; } = 200;
+    /// <summary>
+    /// Total planner attempts including the first when JSON is invalid, truncated, or contractually unusable.
+    /// </summary>
+    public int SpecialistToolSelectionPlannerMaxRecoveryAttempts { get; init; } = 2;
+    /// <summary>
     /// Extra user turns asking for dataset query evidence when only structural tools ran but the dispatch expects metrics.
     /// </summary>
     public int SpecialistMaxStructuralEvidenceRecoveryUserTurns { get; init; }

@@ -18,6 +18,7 @@ public sealed class SpecialistToolAgentWorkerTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 5,
                 SpecialistToolCallMaxOutputTokens = 900,
                 ToolTurnMinOutputTokens = 512,
@@ -95,6 +96,7 @@ public sealed class SpecialistToolAgentWorkerTests
             ContextBudgetCharsPerToken = 2,
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 4,
                 SpecialistToolCallMaxOutputTokens = 900,
                 ToolTurnMinOutputTokens = 512,
@@ -144,6 +146,7 @@ public sealed class SpecialistToolAgentWorkerTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 5,
                 SpecialistMaxStructuralEvidenceRecoveryUserTurns = 1,
                 SpecialistRecoveryPreferToolChoiceRequired = false
@@ -213,6 +216,7 @@ public sealed class SpecialistToolAgentWorkerTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 6,
                 SpecialistToolCallMaxOutputTokens = 900,
                 ToolTurnMinOutputTokens = 512,
@@ -298,6 +302,7 @@ public sealed class SpecialistToolAgentWorkerTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 6,
                 SpecialistToolCallMaxOutputTokens = 900
             }
@@ -369,6 +374,7 @@ public sealed class SpecialistToolAgentWorkerTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 5,
                 SpecialistMaxStructuralEvidenceRecoveryUserTurns = 1
             }
@@ -430,7 +436,11 @@ public sealed class SpecialistToolAgentWorkerTests
         var options = new AgentOptions
         {
             Model = "m",
-            MultiAgent = new MultiAgentOrchestrationOptions { SpecialistMaxToolIterations = 4 }
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 4
+            }
         };
 
         var runtime = new SchemaThenAggregateRuntime();

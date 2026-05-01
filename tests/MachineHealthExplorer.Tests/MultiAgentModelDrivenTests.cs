@@ -13,7 +13,7 @@ namespace MachineHealthExplorer.Tests;
 public sealed class MultiAgentModelDrivenTests
 {
     [Fact]
-    public async Task Coordinator_TryPlanAsync_WhenLlmReturnsInvalidAndTruncated_RetriesWithoutHeuristicFallback()
+    public async Task Coordinator_TryPlanAsync_WhenLlmReturnsInvalidAndTruncated_RetriesUntilValidPlan()
     {
         var options = new AgentOptions
         {
@@ -30,7 +30,12 @@ public sealed class MultiAgentModelDrivenTests
         var chat = new ModelDrivenQueuingChatClient(
             new AgentModelResponse { Model = "m", Content = "not-json", FinishReason = "stop" },
             new AgentModelResponse { Model = "m", Content = """{"notes":"x"}""", FinishReason = "length" },
-            new AgentModelResponse { Model = "m", Content = """{"steps":[]}""", FinishReason = "stop" });
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = """{"steps":[{"specialist":"QueryAnalysis","reason":"quant","parallel_group":0}]}""",
+                FinishReason = "stop"
+            });
 
         var coordinator = new CoordinatorAgent(options, chat, NullLogger.Instance);
         var result = await coordinator.TryPlanAsync(
@@ -40,10 +45,10 @@ public sealed class MultiAgentModelDrivenTests
                 Array.Empty<AgentConversationMessage>(),
                 CancellationToken.None);
 
-        Assert.False(result.Success);
-        Assert.Empty(result.Plan.Steps);
-        Assert.NotNull(result.UserVisibleFailureMessage);
-        Assert.Contains("tentativas", result.UserVisibleFailureMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.True(result.Success);
+        Assert.Single(result.Plan.Steps);
+        Assert.Equal(AgentSpecialistKind.QueryAnalysis, result.Plan.Steps[0].SpecialistKind);
+        Assert.Null(result.UserVisibleFailureMessage);
         Assert.Equal(3, chat.Requests.Count);
 
         for (var i = 1; i < chat.Requests.Count; i++)
@@ -53,6 +58,67 @@ public sealed class MultiAgentModelDrivenTests
                 chat.Requests[i].SystemPrompt,
                 StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    [Fact]
+    public async Task Coordinator_TryPlanAsync_AcceptsEmptyPlan_ForNonAnalyticalTurn()
+    {
+        var options = new AgentOptions
+        {
+            Model = "m",
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableCoordinatorLlmPlanning = true
+            }
+        };
+
+        var chat = new ModelDrivenQueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = """{"steps":[],"notes":"greeting only"}""",
+                FinishReason = "stop"
+            });
+
+        var coordinator = new CoordinatorAgent(options, chat, NullLogger.Instance);
+        var result = await coordinator.TryPlanAsync(
+                "m",
+                "ola",
+                new AgentConversationMemory(),
+                Array.Empty<AgentConversationMessage>(),
+                CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Empty(result.Plan.Steps);
+        Assert.Null(result.UserVisibleFailureMessage);
+        Assert.Single(chat.Requests);
+    }
+
+    [Fact]
+    public async Task MultiAgentSessionEngine_Greeting_BypassesModelCalls()
+    {
+        var chat = new ModelDrivenRecordingChatClient();
+        var engine = new MultiAgentSessionEngine(
+            new AgentOptions
+            {
+                MultiAgent = new MultiAgentOrchestrationOptions
+                {
+                    EnableCoordinatorLlmPlanning = true
+                }
+            },
+            chat,
+            new NoopToolRuntime(),
+            NullLogger.Instance);
+
+        var result = await engine.RunAsync(
+            new AgentExecutionContext { UserInput = "ola" },
+            CancellationToken.None);
+
+        Assert.Empty(chat.Requests);
+        Assert.Empty(result.ToolExecutions);
+        Assert.Equal("pt", result.UpdatedConversationMemory?.LanguagePreference);
+        Assert.Contains("Como posso ajudar", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("direct_casual_turn", result.MultiAgentTrace?.Plan.CoordinatorNotes);
     }
 
     [Fact]
@@ -101,7 +167,11 @@ public sealed class MultiAgentModelDrivenTests
         var options = new AgentOptions
         {
             Model = "m",
-            MultiAgent = new MultiAgentOrchestrationOptions { SpecialistMaxToolIterations = 6 },
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 6
+            },
             MaxToolEvidenceContentChars = 8000
         };
 
@@ -357,6 +427,15 @@ public sealed class MultiAgentModelDrivenTests
                     ResultJson = """{"matches":[]}"""
                 });
         }
+    }
+
+    private sealed class NoopToolRuntime : IAgentToolRuntime
+    {
+        public IReadOnlyList<AgentToolDefinition> GetTools()
+            => Array.Empty<AgentToolDefinition>();
+
+        public Task<AgentToolExecutionRecord> ExecuteAsync(string toolName, string argumentsJson, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("No tools are available in this test runtime.");
     }
 
     private sealed class ModelDrivenQueuingChatClient : IAgentChatClient

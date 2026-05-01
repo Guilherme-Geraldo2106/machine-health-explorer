@@ -195,7 +195,11 @@ public sealed class MultiAgentOrchestrationTests
         var options = new AgentOptions
         {
             Model = "m",
-            MultiAgent = new MultiAgentOrchestrationOptions { SpecialistMaxToolIterations = 6 },
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 6
+            },
             MaxToolEvidenceContentChars = 8000
         };
 

@@ -513,6 +513,12 @@ internal static class LanguageHeuristics
     {
         var text = latestUserInput.ToLowerInvariant();
         var trimmed = text.TrimStart();
+        var compact = text.Trim(' ', '\t', '\r', '\n', '.', ',', '!', '?', ';', ':');
+
+        if (compact is "ola" or "oi" or "bom dia" or "boa tarde" or "boa noite" or "obrigado" or "obrigada" or "valeu")
+        {
+            return true;
+        }
 
         if (trimmed.StartsWith("qual ", StringComparison.Ordinal)
             || trimmed.StartsWith("quais ", StringComparison.Ordinal)

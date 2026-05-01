@@ -16,6 +16,14 @@ namespace MachineHealthExplorer.Tests;
 
 public sealed class AgentRuntimeTests
 {
+    /// <summary>
+    /// Stubbed LLM queues in these tests do not include specialist tool-selection planner JSON responses.
+    /// </summary>
+    private static readonly MultiAgentOrchestrationOptions MultiAgentStubQueue = new()
+    {
+        EnableSpecialistToolSelectionPlanning = false
+    };
+
     private const string MinimalSpecialistSynthesisJson =
         """{"relevantColumns":[],"ambiguities":[],"evidences":[],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}""";
 
@@ -71,7 +79,8 @@ public sealed class AgentRuntimeTests
                 Model = "qwen-test",
                 MaxToolIterations = 3,
                 EnableWorkerPasses = false,
-                EnableContextCompaction = false
+                EnableContextCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -236,7 +245,8 @@ public sealed class AgentRuntimeTests
                 MaxToolIterations = 3,
                 MaxContinuationRounds = 6,
                 EnableWorkerPasses = false,
-                EnableContextCompaction = false
+                EnableContextCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -278,7 +288,8 @@ public sealed class AgentRuntimeTests
                 Model = "qwen-test",
                 MaxToolIterations = 2,
                 EnableWorkerPasses = false,
-                EnableContextCompaction = false
+                EnableContextCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -308,7 +319,8 @@ public sealed class AgentRuntimeTests
                 MaxToolIterations = 2,
                 MaxContinuationRounds = 2,
                 EnableWorkerPasses = false,
-                EnableContextCompaction = false
+                EnableContextCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -358,7 +370,8 @@ public sealed class AgentRuntimeTests
                 MaxConversationMessages = 8,
                 CompactionKeepRecentMessages = 6,
                 EnableContextCompaction = true,
-                EnableWorkerPasses = false
+                EnableWorkerPasses = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -430,7 +443,8 @@ public sealed class AgentRuntimeTests
                 MaxToolIterations = 3,
                 EnableWorkerPasses = true,
                 EnableMemoryWorkerAfterFinalAnswer = true,
-                EnableContextCompaction = false
+                EnableContextCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -473,7 +487,8 @@ public sealed class AgentRuntimeTests
                 MaxConversationMessages = 6,
                 CompactionKeepRecentMessages = 4,
                 EnableContextCompaction = true,
-                EnableWorkerPasses = false
+                EnableWorkerPasses = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
@@ -518,7 +533,8 @@ public sealed class AgentRuntimeTests
                 EnableToolPlannerPass = true,
                 EnableWorkerPasses = false,
                 EnableContextCompaction = false,
-                EnableTokenBudgetCompaction = false
+                EnableTokenBudgetCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             recording,
             new StubMultiToolRuntime(),
@@ -581,7 +597,8 @@ public sealed class AgentRuntimeTests
                 MaxConversationMessages = 200,
                 EnableWorkerPasses = false,
                 EnableDynamicToolScoping = false,
-                EnableToolPlannerPass = false
+                EnableToolPlannerPass = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubAgentToolRuntime(),
@@ -624,7 +641,8 @@ public sealed class AgentRuntimeTests
                 MaxToolIterations = 2,
                 EnableWorkerPasses = false,
                 EnableContextCompaction = false,
-                EnableTokenBudgetCompaction = false
+                EnableTokenBudgetCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubAgentToolRuntime(),
@@ -656,7 +674,8 @@ public sealed class AgentRuntimeTests
                 MaxContinuationRounds = 6,
                 EnableWorkerPasses = false,
                 EnableContextCompaction = false,
-                EnableTokenBudgetCompaction = false
+                EnableTokenBudgetCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubAgentToolRuntime(),
@@ -717,7 +736,8 @@ public sealed class AgentRuntimeTests
                 EnableMemoryWorkerAfterFinalAnswer = true,
                 EnableDynamicToolScoping = false,
                 EnableToolPlannerPass = false,
-                EnableTokenBudgetCompaction = false
+                EnableTokenBudgetCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubAgentToolRuntime(),
@@ -782,6 +802,45 @@ public sealed class AgentRuntimeTests
         Assert.Equal(3920, response.Usage!.PromptTokens);
         Assert.Equal(176, response.Usage.CompletionTokens);
         Assert.Equal(120, response.Usage.ReasoningTokens);
+    }
+
+    [Fact]
+    public async Task LmStudioChatClient_PreservesWorkerMemoryJsonContent()
+    {
+        const string responseJson = """
+        {
+          "model": "google/gemma-4-e4b",
+          "choices": [
+            {
+              "message": {
+                "role": "assistant",
+                "content": "```json\n{\"currentUserIntent\":\"ola\",\"language\":\"pt\",\"pendingQuestions\":[],\"toolHighlights\":[]}\n```"
+              },
+              "finish_reason": "stop"
+            }
+          ]
+        }
+        """;
+
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(responseJson))
+        {
+            BaseAddress = new Uri("http://127.0.0.1:1234/v1/")
+        };
+
+        using var chatClient = new LmStudioChatClient(
+            new AgentOptions { BaseUrl = "http://127.0.0.1:1234/v1", Model = "m" },
+            httpClient);
+
+        var response = await chatClient.CompleteAsync(new AgentModelRequest
+        {
+            Model = "m",
+            SystemPrompt = "sys",
+            Messages = [new AgentConversationMessage { Role = AgentConversationRole.User, Content = "memory" }],
+            EnableTools = false
+        });
+
+        Assert.Contains("currentUserIntent", response.Content, StringComparison.Ordinal);
+        Assert.Null(AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content));
     }
 
     [Fact]
@@ -931,7 +990,8 @@ public sealed class AgentRuntimeTests
                 EnableToolPlannerPass = true,
                 EnableWorkerPasses = false,
                 EnableContextCompaction = false,
-                EnableTokenBudgetCompaction = false
+                EnableTokenBudgetCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             recording,
             new StubMultiToolRuntime(),
@@ -985,7 +1045,8 @@ public sealed class AgentRuntimeTests
                 EnableContextCompaction = false,
                 EnableTokenBudgetCompaction = false,
                 EnableDynamicToolScoping = false,
-                EnableToolPlannerPass = false
+                EnableToolPlannerPass = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubMultiToolRuntime(),
@@ -1033,7 +1094,8 @@ public sealed class AgentRuntimeTests
                 EnableContextCompaction = false,
                 EnableTokenBudgetCompaction = false,
                 EnableDynamicToolScoping = false,
-                EnableToolPlannerPass = false
+                EnableToolPlannerPass = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubMultiToolRuntime(),
@@ -1062,7 +1124,8 @@ public sealed class AgentRuntimeTests
                 EnableToolPlannerPass = true,
                 EnableWorkerPasses = false,
                 EnableContextCompaction = false,
-                EnableTokenBudgetCompaction = false
+                EnableTokenBudgetCompaction = false,
+                MultiAgent = MultiAgentStubQueue
             },
             recording,
             new StubMultiToolRuntime(),
@@ -1114,7 +1177,8 @@ public sealed class AgentRuntimeTests
                 EnableContextCompaction = false,
                 EnableTokenBudgetCompaction = false,
                 EnableDynamicToolScoping = false,
-                EnableToolPlannerPass = false
+                EnableToolPlannerPass = false,
+                MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             new StubMultiToolRuntime(),
