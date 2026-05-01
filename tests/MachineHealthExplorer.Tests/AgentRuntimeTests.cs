@@ -1096,6 +1096,13 @@ public sealed class AgentRuntimeTests
                 ],
                 FinishReason = "tool_calls"
             },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = "DONE_NO_MORE_TOOLS",
+                FinishReason = "stop",
+                ToolCalls = []
+            },
             CreateSpecialistSynthesisJsonResponse(),
             new AgentModelResponse
             {

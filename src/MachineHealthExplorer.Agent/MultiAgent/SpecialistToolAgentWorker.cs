@@ -84,6 +84,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
         var plannerSuppressedForLengthRecovery = false;
         IReadOnlyList<AgentToolDefinition>? recoveryToolSurface = null;
         var toolTurnLengthRecoveriesAttempted = 0;
+        var lengthRecoveryWaveExtended = false;
 
         if (!request.UseFullToolSchemas)
         {
@@ -501,11 +502,66 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             if (response.ToolCalls.Count > 0
                 && scopedCalls.Length == 0)
             {
+                var requestedNames = string.Join(
+                    ",",
+                    response.ToolCalls.Select(c => c.Name).Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
+                var exposedList = string.Join(
+                    ",",
+                    toolsExposedForModelTurn.Select(t => t.Name).Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
+                var logPayload = AgentJsonSerializer.Serialize(new
+                {
+                    requested_tool_calls = response.ToolCalls.Select(c => c.Name).ToArray(),
+                    exposed_tools_this_turn = toolsExposedForModelTurn.Select(t => t.Name).ToArray(),
+                    specialist_allowed_tools = allowedNames
+                });
                 _logger.LogWarning(
-                    "Specialist {Specialist} iteration={Iteration} dropped_raw_tool_calls_not_in_specialist_allowlist names=[{Names}]",
+                    "Specialist {Specialist} iteration={Iteration} tool_calls_not_on_specialist_allowlist payload={Payload}",
                     kind,
                     iteration,
-                    string.Join(", ", response.ToolCalls.Select(c => c.Name)));
+                    AgentPromptBudgetGuard.CompactPlain(logPayload, 2000));
+                _chatSessionLogger.Append(new ChatSessionLogEvent(
+                    default,
+                    string.Empty,
+                    "agent.tool_call.rejected_allowlist",
+                    "internal",
+                    model,
+                    response.FinishReason,
+                    SummarizeToolCallsForLog(response.ToolCalls),
+                    null,
+                    null,
+                    null,
+                    logPayload,
+                    null,
+                    null));
+
+                conversation.Add(new AgentConversationMessage
+                {
+                    Role = AgentConversationRole.Assistant,
+                    Content = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content),
+                    ToolCalls = response.ToolCalls
+                });
+
+                foreach (var call in response.ToolCalls)
+                {
+                    var errorJson = SpecialistToolSurfaceValidation.BuildToolNotOnSpecialistAllowlistResultJson(
+                        call.Name,
+                        allowedNames,
+                        toolsExposedForModelTurn,
+                        scopedTools,
+                        request.UseFullToolSchemas);
+                    conversation.Add(new AgentConversationMessage
+                    {
+                        Role = AgentConversationRole.Tool,
+                        Name = call.Name,
+                        ToolCallId = call.Id,
+                        Content = errorJson
+                    });
+                }
+
+                requireToolCallNextTurn = true;
+                continue;
             }
 
             if (scopedCalls.Length > 0)
@@ -631,9 +687,24 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             {
                 encounteredTruncationWithoutTools = true;
                 var maxLengthRecoveries = Math.Max(0, _options.MultiAgent.SpecialistToolTurnLengthRecoveryMaxAttempts);
-                if (toolTurnLengthRecoveriesAttempted < maxLengthRecoveries)
+                var recoveryWaveAfterCeiling = !lengthRecoveryWaveExtended
+                    && toolTurnLengthRecoveriesAttempted >= maxLengthRecoveries
+                    && ComputeToolCallMaxOutputTokens(estimatedPrompt, request, lastToolTurnUsage) > toolTurnMaxOut + 32
+                    && toolsExposedForModelTurn.Count > 0
+                    && iteration + 1 < maxIterations;
+                if (toolTurnLengthRecoveriesAttempted < maxLengthRecoveries
+                    || recoveryWaveAfterCeiling)
                 {
-                    toolTurnLengthRecoveriesAttempted++;
+                    if (recoveryWaveAfterCeiling)
+                    {
+                        lengthRecoveryWaveExtended = true;
+                        toolTurnLengthRecoveriesAttempted = 0;
+                    }
+                    else
+                    {
+                        toolTurnLengthRecoveriesAttempted++;
+                    }
+
                     recoveryToolSurface = toolsExposedForModelTurn;
                     plannerSuppressedForLengthRecovery = true;
                     var targetChars = Math.Max(
@@ -889,7 +960,7 @@ The previous tool-enabled assistant turn was truncated before emitting a tool ca
 
 Executed tools so far (compact): {SpecialistToolTurnBudgetRecovery.BuildExecutedToolsSummary(executedTools)}
 
-Continue now: emit exactly one valid tool call if more data is needed, or reply with exactly this single line and nothing else: DONE_NO_MORE_TOOLS
+Continue now: prefer one compact tool_calls JSON entry with minimal visible prose if more data is needed; otherwise reply with exactly this single line and nothing else: DONE_NO_MORE_TOOLS
 """;
     }
 
@@ -1155,7 +1226,7 @@ Instructions:
             return 0;
         }
 
-        var cap = Math.Max(128, _options.MultiAgent.SpecialistToolCallMaxOutputTokens);
+        var cap = AgentContextBudgetEstimator.ComputeToolTurnDynamicOutputCap(_options, lastUsage);
         var merged = Math.Min(effective, cap);
         if (request.ToolTurnMaxOutputTokensCap is { } hardCap)
         {
@@ -1258,5 +1329,18 @@ If tool outputs were partial or conflicting, record that in ambiguities and hypo
 
         var text = builder.ToString();
         return text.Length <= maxChars ? text : string.Concat(text.AsSpan(0, maxChars), "…");
+    }
+
+    private static IReadOnlyList<ChatToolCallLogSummary>? SummarizeToolCallsForLog(IReadOnlyList<AgentToolCall> toolCalls)
+    {
+        if (toolCalls.Count == 0)
+        {
+            return null;
+        }
+
+        return toolCalls
+            .Select(call => new ChatToolCallLogSummary(call.Id, call.Name, (call.ArgumentsJson ?? "{}").Length))
+            .Where(summary => !string.IsNullOrWhiteSpace(summary.Name))
+            .ToArray();
     }
 }

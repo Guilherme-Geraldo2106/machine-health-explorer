@@ -38,6 +38,65 @@ internal static class SpecialistToolSurfaceValidation
         });
     }
 
+    public static string BuildToolNotOnSpecialistAllowlistResultJson(
+        string requestedToolName,
+        IReadOnlyList<string> specialistAllowlistToolNames,
+        IReadOnlyList<AgentToolDefinition> exposedToolsThisTurn,
+        IReadOnlyList<AgentToolDefinition> scopedCatalogForSchemas,
+        bool useFullToolSchemas)
+    {
+        var allowed = specialistAllowlistToolNames
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var exposed = exposedToolsThisTurn
+            .Select(t => t.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var compactContract = useFullToolSchemas
+            ? MultiAgentPromptBuilder.BuildGroupAndAggregateCompactContractHint()
+            : AgentPromptBudgetGuard.CompactPlain(MultiAgentPromptBuilder.BuildMinimalToolParametersContractHint(), 900);
+
+        var schemaDigest = BuildCompactToolSchemasDigest(scopedCatalogForSchemas);
+
+        return AgentJsonSerializer.Serialize(new
+        {
+            tool_error = true,
+            error =
+                "Requested tool name is not available for this specialist allowlist. Pick one specialist_allowed_tools entry that appears in exposed_tools_this_turn, match arguments to compact_contract / schemas_digest, then emit a valid tool_calls entry.",
+            error_kind = "tool_not_on_specialist_allowlist",
+            requested_tool = requestedToolName,
+            specialist_allowed_tools = allowed,
+            exposed_tools_this_turn = exposed,
+            compact_contract = compactContract,
+            schemas_digest = schemaDigest,
+            instruction =
+                "Call only tools from specialist_allowed_tools. For this turn, the model only had exposed_tools_this_turn; intersection of those sets is the valid name set. Fix the tool name and arguments, then retry."
+        });
+    }
+
+    private static string BuildCompactToolSchemasDigest(IReadOnlyList<AgentToolDefinition> catalog)
+    {
+        if (catalog.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var items = new List<string>(Math.Min(32, catalog.Count));
+        foreach (var tool in catalog.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var schema = string.IsNullOrWhiteSpace(tool.ParametersJsonSchema)
+                ? "{}"
+                : AgentPromptBudgetGuard.CompactPlain(tool.ParametersJsonSchema, 700);
+            items.Add($"{tool.Name}:{schema}");
+        }
+
+        return string.Join(" | ", items);
+    }
+
     private static string? FindParametersSchema(string toolName, IReadOnlyList<AgentToolDefinition> catalog)
     {
         foreach (var tool in catalog)

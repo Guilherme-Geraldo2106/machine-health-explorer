@@ -3,12 +3,201 @@ using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
 using MachineHealthExplorer.Agent.MultiAgent;
 using MachineHealthExplorer.Agent.Services;
+using MachineHealthExplorer.Logging.Abstractions;
+using MachineHealthExplorer.Logging.Models;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MachineHealthExplorer.Tests;
 
 public sealed class SpecialistToolAgentWorkerTests
 {
+    [Fact]
+    public void BuildToolNotOnSpecialistAllowlistResultJson_ContainsAllowlistPayload()
+    {
+        var allowed = new[] { "get_schema", "group_and_aggregate" };
+        var exposed = new List<AgentToolDefinition>
+        {
+            new() { Name = "get_schema", Description = "s", ParametersJsonSchema = """{"type":"object"}""" }
+        };
+        var catalog = new List<AgentToolDefinition>
+        {
+            new() { Name = "get_schema", Description = "s", ParametersJsonSchema = """{"type":"object"}""" },
+            new() { Name = "group_and_aggregate", Description = "a", ParametersJsonSchema = """{"type":"object"}""" }
+        };
+
+        var json = SpecialistToolSurfaceValidation.BuildToolNotOnSpecialistAllowlistResultJson(
+            "made_up_tool",
+            allowed,
+            exposed,
+            catalog,
+            useFullToolSchemas: true);
+
+        Assert.Contains("tool_not_on_specialist_allowlist", json, StringComparison.Ordinal);
+        Assert.Contains("made_up_tool", json, StringComparison.Ordinal);
+        Assert.Contains("specialist_allowed_tools", json, StringComparison.Ordinal);
+        Assert.Contains("exposed_tools_this_turn", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ToolCallNotOnSpecialistAllowlist_AppendsVisibleToolErrorAndLogsEvent()
+    {
+        var sessionLog = new CapturingChatSessionLogger();
+        var options = new AgentOptions
+        {
+            Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 8,
+                SpecialistRecoveryPreferToolChoiceRequired = false
+            }
+        };
+
+        var runtime = new GenericTwoToolRuntime();
+        var synthesisJson =
+            """{"relevantColumns":[],"ambiguities":[],"evidences":[{"sourceTool":"get_schema","summary":"ok","supportingJsonFragment":null}],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}""";
+
+        var chat = new QueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "bad", Name = "made_up_tool", ArgumentsJson = "{}" }
+                ]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "1", Name = "get_schema", ArgumentsJson = "{}" }
+                ]
+            },
+            new AgentModelResponse { Model = "m", Content = string.Empty, FinishReason = "stop", ToolCalls = [] },
+            new AgentModelResponse { Model = "m", Content = synthesisJson, FinishReason = "stop" });
+
+        var worker = new SpecialistToolAgentWorker(options, runtime, chat, NullLogger.Instance, sessionLog);
+        var request = new AgentTaskRequest(
+            AgentSpecialistKind.QueryAnalysis,
+            "Question",
+            "dispatch",
+            new AgentConversationMemory(),
+            Array.Empty<AgentConversationMessage>(),
+            runtime.GetTools(),
+            "m",
+            "sys",
+            ExpectsDatasetQueryEvidence: false);
+
+        var result = await worker.ExecuteAsync(request, CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Contains(
+            sessionLog.Events,
+            e => e.EventType.Equals("agent.tool_call.rejected_allowlist", StringComparison.Ordinal));
+
+        var serialized = JsonSerializer.Serialize(chat.Requests);
+        Assert.Contains("tool_not_on_specialist_allowlist", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            result.ToolExecutions,
+            e => e.ToolName.Equals("made_up_tool", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RepeatedLengthWithoutToolCalls_RaisesToolTurnMaxThenRecoversWithGenericTool()
+    {
+        var options = new AgentOptions
+        {
+            Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 12,
+                SpecialistToolCallMaxOutputTokens = 512,
+                ToolTurnMinOutputTokens = 512,
+                SpecialistToolTurnLengthRecoveryMaxAttempts = 2,
+                SpecialistRecoveryPreferToolChoiceRequired = false
+            }
+        };
+
+        var runtime = new GenericTwoToolRuntime();
+        var heavyUsage = new AgentTokenUsage { ReasoningTokens = 480, CompletionTokens = 28 };
+        var chat = new QueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "1", Name = "get_schema", ArgumentsJson = "{}" }
+                ]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = string.Empty,
+                FinishReason = "length",
+                ToolCalls = [],
+                Usage = heavyUsage
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = string.Empty,
+                FinishReason = "length",
+                ToolCalls = [],
+                Usage = heavyUsage
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "2", Name = "group_and_aggregate", ArgumentsJson = "{}" }
+                ]
+            },
+            new AgentModelResponse { Model = "m", Content = string.Empty, FinishReason = "stop", ToolCalls = [] },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content =
+                    """
+                    {"relevantColumns":[],"ambiguities":[],"evidences":[{"sourceTool":"group_and_aggregate","summary":"ok","supportingJsonFragment":null}],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}
+                    """,
+                FinishReason = "stop"
+            });
+
+        var worker = new SpecialistToolAgentWorker(options, runtime, chat, NullLogger.Instance);
+        var request = new AgentTaskRequest(
+            AgentSpecialistKind.QueryAnalysis,
+            "Quantitative question",
+            "dispatch",
+            new AgentConversationMemory(),
+            Array.Empty<AgentConversationMessage>(),
+            runtime.GetTools(),
+            "m",
+            "You are QueryAnalysis.",
+            ExpectsDatasetQueryEvidence: true);
+
+        var result = await worker.ExecuteAsync(request, CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Contains(
+            result.ToolExecutions,
+            e => e.ToolName.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
+
+        var toolRequests = chat.Requests.Where(r => r.EnableTools && r.Tools.Count > 0).ToArray();
+        Assert.True(toolRequests.Length >= 3);
+        Assert.Contains(toolRequests, r => r.MaxOutputTokens > 600);
+    }
+
     [Fact]
     public async Task ExecuteAsync_TruncationWithoutTools_DoesNotInjectRawReasoningIntoNextPrompt()
     {
@@ -622,6 +811,13 @@ public sealed class SpecialistToolAgentWorkerTests
 
         public Task<IReadOnlyList<string>> GetAvailableModelsAsync(CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<string>>(["m"]);
+    }
+
+    private sealed class CapturingChatSessionLogger : IChatSessionLogger
+    {
+        public List<ChatSessionLogEvent> Events { get; } = [];
+
+        public void Append(ChatSessionLogEvent logEvent) => Events.Add(logEvent);
     }
 
     [Fact]

@@ -84,7 +84,7 @@ public sealed record MultiAgentOrchestrationOptions
     /// <summary>
     /// After a tool-enabled turn returns finish_reason=length without tool_calls, at most this many direct recovery attempts (no planner) run before failing with a technical message.
     /// </summary>
-    public int SpecialistToolTurnLengthRecoveryMaxAttempts { get; init; } = 1;
+    public int SpecialistToolTurnLengthRecoveryMaxAttempts { get; init; } = 4;
     /// <summary>
     /// Extra user turns asking for dataset query evidence when only structural tools ran but the dispatch expects metrics.
     /// </summary>

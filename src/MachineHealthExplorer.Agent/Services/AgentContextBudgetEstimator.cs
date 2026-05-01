@@ -170,6 +170,33 @@ internal static class AgentContextBudgetEstimator
     }
 
     /// <summary>
+    /// Upper bound for tool-call turns: at least <see cref="MultiAgentOrchestrationOptions.SpecialistToolCallMaxOutputTokens"/>,
+    /// but grows when the last completion used reasoning+visible tokens near the prior max_tokens cap (same completion budget).
+    /// </summary>
+    public static int ComputeToolTurnDynamicOutputCap(AgentOptions options, AgentTokenUsage? lastUsage)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var multi = options.MultiAgent;
+        var baseCap = Math.Max(128, multi.SpecialistToolCallMaxOutputTokens);
+        if (lastUsage is null)
+        {
+            return Math.Min(options.MaxOutputTokens, baseCap);
+        }
+
+        var reasoning = lastUsage.ReasoningTokens ?? 0;
+        var completion = lastUsage.CompletionTokens;
+        var observed = reasoning + completion;
+        if (observed <= 0)
+        {
+            return Math.Min(options.MaxOutputTokens, baseCap);
+        }
+
+        var margin = Math.Max(96, multi.ToolTurnReasoningReserveTokens);
+        var fromUsage = observed + margin;
+        return Math.Min(options.MaxOutputTokens, Math.Max(baseCap, fromUsage));
+    }
+
+    /// <summary>
     /// Sizes max_tokens for tool-call turns. Returns <c>0</c> when the soft context cannot fit the tool-turn completion floor.
     /// </summary>
     public static int ComputeToolTurnEffectiveMaxOutputTokens(

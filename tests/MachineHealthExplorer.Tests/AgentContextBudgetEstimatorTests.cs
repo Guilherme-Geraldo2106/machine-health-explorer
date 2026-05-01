@@ -102,4 +102,30 @@ public sealed class AgentContextBudgetEstimatorTests
         var capped = Math.Min(toolTurn, options.MultiAgent.SpecialistToolCallMaxOutputTokens);
         Assert.True(capped >= 512);
     }
+
+    [Fact]
+    public void ComputeToolTurnDynamicOutputCap_FromPriorReasoningAndCompletion_ExceedsSpecialistToolCallCap()
+    {
+        var options = new AgentOptions
+        {
+            MaxOutputTokens = 8192,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                SpecialistToolCallMaxOutputTokens = 512,
+                ToolTurnReasoningReserveTokens = 128
+            }
+        };
+
+        var usage = new AgentTokenUsage
+        {
+            CompletionTokens = 18,
+            ReasoningTokens = 494
+        };
+
+        var cap = AgentContextBudgetEstimator.ComputeToolTurnDynamicOutputCap(options, usage);
+
+        Assert.True(cap > 512);
+        Assert.True(cap >= 494 + 18 + 128);
+        Assert.True(cap <= options.MaxOutputTokens);
+    }
 }
