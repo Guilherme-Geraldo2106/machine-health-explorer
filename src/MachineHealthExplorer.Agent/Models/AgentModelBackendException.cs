@@ -33,4 +33,28 @@ public sealed class AgentModelBackendException : InvalidOperationException
         return lower.Contains("context length", StringComparison.Ordinal)
                && (lower.Contains("greater than", StringComparison.Ordinal) || lower.Contains("exceed", StringComparison.Ordinal));
     }
+
+    /// <summary>
+    /// Heuristic: backend rejected <c>response_format</c> / json_schema structured outputs.
+    /// </summary>
+    public static bool LooksLikeResponseFormatRejected(string? responseBodyOrMessage)
+    {
+        if (string.IsNullOrWhiteSpace(responseBodyOrMessage))
+        {
+            return false;
+        }
+
+        var lower = responseBodyOrMessage.ToLowerInvariant();
+        if (lower.Contains("response_format", StringComparison.Ordinal)
+            || lower.Contains("json_schema", StringComparison.Ordinal))
+        {
+            return lower.Contains("invalid", StringComparison.Ordinal)
+                   || lower.Contains("unknown", StringComparison.Ordinal)
+                   || lower.Contains("unsupported", StringComparison.Ordinal)
+                   || lower.Contains("not supported", StringComparison.Ordinal)
+                   || lower.Contains("unrecognized", StringComparison.Ordinal);
+        }
+
+        return false;
+    }
 }

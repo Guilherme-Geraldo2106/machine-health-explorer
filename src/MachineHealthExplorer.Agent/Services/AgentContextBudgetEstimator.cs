@@ -10,6 +10,29 @@ internal static class AgentContextBudgetEstimator
         return options.HostContextTokens > 0 ? options.HostContextTokens : options.ContextSlotTokens;
     }
 
+    /// <summary>
+    /// Minimum max_tokens for assistant completions (no tools) — callers must not invoke the model below this when a compliant call is required.
+    /// </summary>
+    public static int GetAssistantCompletionFloorTokens(AgentOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return Math.Clamp(
+            options.MinAssistantCompletionTokens,
+            96,
+            Math.Max(96, options.MaxOutputTokens));
+    }
+
+    /// <summary>
+    /// Minimum max_tokens for tool-enabled specialist turns (max of configured tool floors).
+    /// </summary>
+    public static int GetToolTurnCompletionFloorTokens(AgentOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var multi = options.MultiAgent;
+        var merged = Math.Max(multi.ToolTurnMinOutputTokens, multi.ToolTurnSafeMinMaxOutputTokens);
+        return Math.Clamp(merged, 96, Math.Max(96, options.MaxOutputTokens));
+    }
+
     public static int EstimatePromptTokens(
         AgentOptions options,
         string systemPrompt,
@@ -53,35 +76,57 @@ internal static class AgentContextBudgetEstimator
         return total;
     }
 
+    /// <summary>
+    /// Sizes max_tokens for non-tool assistant completions. Reasoning tokens count inside the same completion budget; this prefers
+    /// <paramref name="visibleCompletionFloor"/> + reasoning headroom when the host context slot allows it.
+    /// When <paramref name="continuationAssistantPass"/> is true, prior-turn reasoning usage must not shrink the next chunk budget.
+    /// </summary>
     public static int ComputeEffectiveMaxOutputTokens(
         AgentOptions options,
         int estimatedPromptTokens,
         int reasoningPressureSteps,
-        AgentTokenUsage? lastUsage)
+        AgentTokenUsage? lastUsage,
+        bool continuationAssistantPass = false,
+        int? visibleCompletionFloorOverride = null)
     {
-        var reasoningReserve = options.ReasoningReserveTokens;
-        if (lastUsage?.ReasoningTokens is { } reasoning && reasoning > 0)
-        {
-            reasoningReserve = Math.Clamp(reasoningReserve + reasoning, 256, 4096);
-        }
-
-        reasoningReserve += Math.Clamp(reasoningPressureSteps, 0, 12) * 128;
-
+        ArgumentNullException.ThrowIfNull(options);
         var host = GetEffectiveHostContextTokens(options);
         var softContext = Math.Max(512, host - options.ContextSafetyMarginTokens);
-        var remainingForCompletion = softContext - estimatedPromptTokens - reasoningReserve;
-        var completionFloor = Math.Clamp(
-            options.MinAssistantCompletionTokens,
-            96,
-            Math.Max(96, options.MaxOutputTokens));
-        var cappedByMax = Math.Min(options.MaxOutputTokens, remainingForCompletion);
-
-        if (remainingForCompletion < completionFloor)
+        var slotForCompletion = softContext - estimatedPromptTokens;
+        var completionFloor = visibleCompletionFloorOverride ?? GetAssistantCompletionFloorTokens(options);
+        if (slotForCompletion < completionFloor)
         {
-            return Math.Max(1, cappedByMax);
+            return 0;
         }
 
-        return Math.Min(options.MaxOutputTokens, Math.Max(completionFloor, cappedByMax));
+        var composerReasoningBudget = options.MultiAgent.FinalComposerReasoningReserveTokens > 0
+            ? options.MultiAgent.FinalComposerReasoningReserveTokens
+            : options.ReasoningReserveTokens;
+
+        var reasoningHeadroom = continuationAssistantPass
+            ? Math.Clamp(composerReasoningBudget / 3, 96, 640)
+            : composerReasoningBudget + Math.Clamp(reasoningPressureSteps, 0, 12) * 128;
+
+        if (!continuationAssistantPass
+            && lastUsage?.ReasoningTokens is { } priorReasoning
+            && priorReasoning > 0)
+        {
+            reasoningHeadroom = Math.Max(reasoningHeadroom, Math.Clamp(priorReasoning, 256, 4096));
+        }
+
+        var minTarget = completionFloor + reasoningHeadroom;
+        var capped = Math.Min(options.MaxOutputTokens, slotForCompletion);
+        if (slotForCompletion < completionFloor)
+        {
+            return 0;
+        }
+
+        if (capped < completionFloor)
+        {
+            return capped;
+        }
+
+        return Math.Max(completionFloor, Math.Min(capped, Math.Max(minTarget, completionFloor)));
     }
 
     /// <summary>
@@ -125,8 +170,7 @@ internal static class AgentContextBudgetEstimator
     }
 
     /// <summary>
-    /// Sizes max_tokens for tool-call turns using <see cref="MultiAgentOrchestrationOptions.ToolTurnMinOutputTokens"/>
-    /// and <see cref="MultiAgentOrchestrationOptions.ToolTurnReasoningReserveTokens"/> instead of global assistant floors/reserves.
+    /// Sizes max_tokens for tool-call turns. Returns <c>0</c> when the soft context cannot fit the tool-turn completion floor.
     /// </summary>
     public static int ComputeToolTurnEffectiveMaxOutputTokens(
         AgentOptions options,
@@ -142,15 +186,12 @@ internal static class AgentContextBudgetEstimator
         var host = GetEffectiveHostContextTokens(options);
         var softContext = Math.Max(512, host - options.ContextSafetyMarginTokens);
         var remainingForCompletion = softContext - estimatedPromptTokens - reasoningReserve;
-        var completionFloor = Math.Clamp(
-            options.MultiAgent.ToolTurnMinOutputTokens,
-            96,
-            Math.Max(96, options.MaxOutputTokens));
+        var completionFloor = GetToolTurnCompletionFloorTokens(options);
         var cappedByMax = Math.Min(options.MaxOutputTokens, remainingForCompletion);
 
-        if (remainingForCompletion < completionFloor)
+        if (remainingForCompletion < completionFloor || cappedByMax < completionFloor)
         {
-            return Math.Max(1, cappedByMax);
+            return 0;
         }
 
         return Math.Min(options.MaxOutputTokens, Math.Max(completionFloor, cappedByMax));

@@ -16,6 +16,8 @@ public sealed class SpecialistToolAgentWorkerTests
         var options = new AgentOptions
         {
             Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
             MultiAgent = new MultiAgentOrchestrationOptions
             {
                 EnableSpecialistToolSelectionPlanning = false,
@@ -81,7 +83,9 @@ public sealed class SpecialistToolAgentWorkerTests
 
         _ = await worker.ExecuteAsync(request, CancellationToken.None);
 
-        var serializedAfterTruncation = JsonSerializer.Serialize(inner.Requests[2].Messages);
+        var afterTruncation = inner.Requests.FirstOrDefault(r => r.EnableTools && r.Messages.Any(m => (m.Content ?? string.Empty).Contains("truncated", StringComparison.OrdinalIgnoreCase)));
+        Assert.NotNull(afterTruncation);
+        var serializedAfterTruncation = JsonSerializer.Serialize(afterTruncation.Messages);
         Assert.DoesNotContain(reasoningMarker, serializedAfterTruncation, StringComparison.Ordinal);
     }
 
@@ -214,13 +218,16 @@ public sealed class SpecialistToolAgentWorkerTests
         var options = new AgentOptions
         {
             Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
             MultiAgent = new MultiAgentOrchestrationOptions
             {
                 EnableSpecialistToolSelectionPlanning = false,
                 SpecialistMaxToolIterations = 6,
                 SpecialistToolCallMaxOutputTokens = 900,
                 ToolTurnMinOutputTokens = 512,
-                ToolTurnReasoningReserveTokens = 128
+                ToolTurnReasoningReserveTokens = 128,
+                SpecialistMaxStructuralEvidenceRecoveryUserTurns = 2
             }
         };
 
@@ -427,7 +434,7 @@ public sealed class SpecialistToolAgentWorkerTests
         _ = await worker.ExecuteAsync(request, CancellationToken.None);
 
         var serialized = string.Join('|', chat.Requests.Select(r => JsonSerializer.Serialize(r.Messages)));
-        Assert.Contains("structural metadata", serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Evidence recovery", serialized, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -436,10 +443,13 @@ public sealed class SpecialistToolAgentWorkerTests
         var options = new AgentOptions
         {
             Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
             MultiAgent = new MultiAgentOrchestrationOptions
             {
                 EnableSpecialistToolSelectionPlanning = false,
-                SpecialistMaxToolIterations = 4
+                SpecialistMaxToolIterations = 4,
+                SpecialistMaxStructuralEvidenceRecoveryUserTurns = 2
             }
         };
 

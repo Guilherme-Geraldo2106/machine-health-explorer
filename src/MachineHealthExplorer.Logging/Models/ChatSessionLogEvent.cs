@@ -13,7 +13,11 @@ public sealed record ChatSessionLogEvent(
     [property: JsonPropertyName("requestPayloadJson")] string? RequestPayloadJson,
     [property: JsonPropertyName("responsePayloadRaw")] string? ResponsePayloadRaw,
     [property: JsonPropertyName("httpStatusCode")] int? HttpStatusCode,
-    [property: JsonPropertyName("error")] string? Error);
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("llmRequestSummary")] ChatLlmRequestSummary? LlmRequestSummary = null,
+    [property: JsonPropertyName("completionTokenUsage")] ChatCompletionTokenLog? CompletionTokenUsage = null,
+    [property: JsonPropertyName("toolExecution")] ChatToolExecutionLog? ToolExecution = null,
+    [property: JsonPropertyName("continuationBudgetDetail")] string? ContinuationBudgetDetail = null);
 
 public sealed record ChatToolCallLogSummary(
     [property: JsonPropertyName("id")] string? Id,

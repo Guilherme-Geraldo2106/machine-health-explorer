@@ -4,6 +4,22 @@ namespace MachineHealthExplorer.Agent.MultiAgent;
 
 internal static class MultiAgentPromptBuilder
 {
+    /// <summary>
+    /// Generic coordinator routing rules about evidence kinds and Discovery vs quantitative specialists (no domain vocabulary).
+    /// </summary>
+    public static string BuildCoordinatorEvidenceRoutingRules()
+        => """
+- Discovery is for structure/profiling only. Do NOT route only to Discovery when the user asks for ranking, comparison, combinations, greatest/least, rates, frequencies, association strength, or other quantitative explanations that require grouped counts or aggregates.
+- It is valid to run Discovery (or rely on prior schema context) before QueryAnalysis for column discovery, but the quantitative answer must still go through QueryAnalysis (or FailureAnalysis if you pick that instead of QueryAnalysis — never both) when aggregates/rates are needed.
+- Use optional per-step "required_evidence" as an array of generic evidence kinds (strings): StructuralSchema | Profile | DistinctValues | RowSample | Aggregate.
+  - Include Aggregate when the user-visible answer needs grouped counts, totals, rates, or ranked comparisons derived from tabular aggregation.
+  - Include Profile when distributions/summaries suffice without aggregates.
+  - Include RowSample when concrete example rows are required.
+  - Include DistinctValues when cardinality/category membership drives the answer.
+  - Include StructuralSchema when fresh schema/column discovery is explicitly required for that step.
+  - If you omit "required_evidence", the system keeps backward-compatible expectations (any profile/aggregate/row-sample/distinct tool output can satisfy generic tabular evidence when expects_dataset_query_evidence is true).
+""".Trim();
+
     private const string GroupAndAggregateParameterContract = """
 group_and_aggregate (exact field names):
 - "groupByBins" MUST be a JSON array of objects; each object requires "columnName", "alias", and "binWidth" (number > 0). Bins are numeric bands only; nothing in the tool marks a band as special.
@@ -111,18 +127,23 @@ You are the FinalComposer for Machine Health Explorer.
 You write the ONLY user-visible answer.
 
 Hard rules:
-- You do NOT have tools. Do not request tools. Do not speculate new dataset queries.
+- You do NOT have tools. Do not request tools. Do not speculate new dataset queries. Do not ask again for the same confirmation already resolved in the recent tail.
 - Ground every concrete claim in the provided specialist JSON artifacts and/or quoted tool fragments.
+- Never invent numbers, thresholds, temperatures, torque, percentuais, contagens ou exemplos concretos que não apareçam explicitamente em evidência de tool ou em keyMetrics derivados dessa evidência.
+- If only schema/column metadata or describe_dataset-style evidence exists (sem agregações, perfis, amostras de linhas ou taxas calculadas nas evidências), state clearly that aggregates/rates were not computed yet — do not fabricate illustrative statistics.
 - The payload may include schemaColumnNamesFromTools: exact column names observed in successful get_schema tool outputs. Treat that list as authoritative for what exists in the loaded dataset snapshot.
 - Do NOT claim that a column "does not exist" or that the dataset lacks a concept (e.g. temperature) when schemaColumnNamesFromTools or tool evidence shows matching columns, or when evidence was truncated/partial.
 - If tool outputs include tool_error=true (invalid arguments / schema mismatch), describe the situation as a technical tool-argument failure the specialists must correct — not as missing underlying data columns.
-- If evidence is missing or ambiguous, say what is missing briefly and suggest a narrower next question (without inventing numbers).
+- If evidence is missing or ambiguous, say what is missing briefly and suggest a narrower next question (sem números inventados).
 - If the recent user/assistant tail already contains a direct answer to a clarification (for example choosing among options the assistant proposed), do not ask that same confirmation again; move on to conclusions or clearly state what numeric/tabular evidence is still missing.
 - When specialist artifacts show missing aggregates/profiles/row samples (only structural metadata), explain that generic aggregation or profiling evidence was not produced — do not re-prompt for the same disambiguation the user already settled.
 - Match the user's language preference when obvious; otherwise follow the detected language hint from the payload.
 - When detectedLanguage is 'pt', write the final answer in Portuguese.
-- Be concise, structured, and practical.
+- Keep exploratory answers short: about 120–180 words unless the user explicitly asked for a long report.
+- When the user only asks for suggested follow-up questions (e.g. "sugira uma pergunta"), answer in Portuguese with exactly three short bullet questions plus one recommended pick in a single short sentence — no long ML roadmap, no extended narrative, no tool requests.
+- Do not produce a lengthy ML plan or methodology essay unless the user explicitly asked for methodology depth.
 - When evidence includes paired counts such as event_count and row_count, clearly distinguish absolute counts from rates (e.g. event_count / row_count when both are present).
+- When the user asks for “causes”, “causadores”, drivers, or what is “more responsible”, treat findings as observed association / co-occurrence in this dataset only — not proof of causal mechanisms — unless the user explicitly supplied an interventional study design (they did not).
 
 Output:
 - Normal assistant prose only (no JSON, no markdown code fences unless the user explicitly asked for code).

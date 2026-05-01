@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.Serialization;
 using MachineHealthExplorer.Agent.Services;
 using Microsoft.Extensions.Logging;
 
@@ -113,7 +114,16 @@ internal sealed class SpecialistToolSelectionPlanner
                     Tools = Array.Empty<AgentToolDefinition>(),
                     EnableTools = false,
                     Temperature = Math.Min(0.1, _options.WorkerTemperature),
-                    MaxOutputTokens = maxOut
+                    MaxOutputTokens = maxOut,
+                    ResponseFormat = _options.EnableStructuredJsonOutputs
+                        ? new AgentJsonSchemaResponseFormat
+                        {
+                            Type = "json_schema",
+                            Name = AgentStructuredOutputJsonSchemas.SpecialistToolSelectionSchemaName,
+                            Strict = _options.UseStrictJsonSchemaInResponseFormat,
+                            SchemaJson = AgentStructuredOutputJsonSchemas.SpecialistToolSelection.Trim()
+                        }
+                        : null
                 }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

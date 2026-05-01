@@ -8,6 +8,18 @@ public enum AgentSpecialistKind
     Reporting = 3
 }
 
+/// <summary>
+/// Generic evidence categories for tabular retrieval (model-driven; no domain semantics).
+/// </summary>
+public enum AgentEvidenceKind
+{
+    StructuralSchema,
+    Profile,
+    DistinctValues,
+    RowSample,
+    Aggregate
+}
+
 public sealed record AgentDispatchStep(
     AgentSpecialistKind SpecialistKind,
     string Reason,
@@ -15,7 +27,12 @@ public sealed record AgentDispatchStep(
     /// <summary>
     /// When false, the specialist may stop after structural tools (schema/search) without requiring aggregates/profiles/row samples.
     /// </summary>
-    bool ExpectsDatasetQueryEvidence = true);
+    bool ExpectsDatasetQueryEvidence = true,
+    /// <summary>
+    /// When non-empty, each listed kind must be satisfied by successful tool runs before the specialist may finish.
+    /// When null or empty, legacy rules apply together with <see cref="ExpectsDatasetQueryEvidence"/>.
+    /// </summary>
+    IReadOnlyList<AgentEvidenceKind>? RequiredEvidenceKinds = null);
 
 public sealed record AgentDispatchPlan(
     IReadOnlyList<AgentDispatchStep> Steps,
@@ -57,7 +74,8 @@ public sealed record AgentTaskRequest(
     string SpecialistSystemPrompt,
     bool UseFullToolSchemas = true,
     int? ToolTurnMaxOutputTokensCap = null,
-    bool ExpectsDatasetQueryEvidence = true);
+    bool ExpectsDatasetQueryEvidence = true,
+    IReadOnlyList<AgentEvidenceKind>? RequiredEvidenceKinds = null);
 
 public sealed record AgentTaskResult(
     AgentSpecialistKind SpecialistKind,

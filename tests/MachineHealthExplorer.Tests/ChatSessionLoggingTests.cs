@@ -156,6 +156,70 @@ public sealed class ChatSessionLoggingTests
     }
 
     [Fact]
+    public async Task ChatSessionLogging_LogsToolExecutionAndTokenDetails()
+    {
+        const string responseJson = """
+        {
+          "model": "google/gemma-4-e4b",
+          "choices": [
+            {
+              "message": { "role": "assistant", "content": "ok" },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 727,
+            "total_tokens": 900,
+            "completion_tokens_details": { "reasoning_tokens": 602 },
+            "prompt_tokens_details": { "cached_tokens": 12 }
+          }
+        }
+        """;
+
+        using var temp = CreateTempLogsRoot(out var manager);
+        manager.StartNewSession();
+        var logPath = manager.CurrentSession!.LogFilePath;
+
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(responseJson))
+        {
+            BaseAddress = new Uri("http://127.0.0.1:1234/v1/")
+        };
+
+        using var chatClient = new LmStudioChatClient(
+            new AgentOptions { BaseUrl = "http://127.0.0.1:1234/v1", Model = "google/gemma-4-e4b" },
+            httpClient,
+            manager);
+
+        _ = await chatClient.CompleteAsync(new AgentModelRequest
+        {
+            Model = "google/gemma-4-e4b",
+            SystemPrompt = "sys",
+            Messages = [new AgentConversationMessage { Role = AgentConversationRole.User, Content = "hi" }],
+            MaxOutputTokens = 900,
+            EnableTools = false,
+            ParallelToolCalls = false
+        });
+
+        var lines = File.ReadAllLines(logPath);
+        Assert.Equal(2, lines.Length);
+        using (var req = JsonDocument.Parse(lines[0]))
+        {
+            Assert.True(req.RootElement.TryGetProperty("llmRequestSummary", out var sum));
+            Assert.Equal(900, sum.GetProperty("maxTokens").GetInt32());
+            Assert.False(sum.GetProperty("parallelToolCalls").GetBoolean());
+        }
+
+        using (var res = JsonDocument.Parse(lines[1]))
+        {
+            Assert.True(res.RootElement.TryGetProperty("completionTokenUsage", out var usage));
+            Assert.Equal(602, usage.GetProperty("reasoningTokens").GetInt32());
+            Assert.Equal(12, usage.GetProperty("cachedPromptTokens").GetInt32());
+            Assert.Contains("cached_tokens", usage.GetProperty("promptTokensDetailsJson").GetString() ?? string.Empty, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task LmStudioChatClient_LogsError_OnHttpFailure()
     {
         using var temp = CreateTempLogsRoot(out var manager);

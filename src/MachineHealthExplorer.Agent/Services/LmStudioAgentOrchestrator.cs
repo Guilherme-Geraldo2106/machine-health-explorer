@@ -1,6 +1,7 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
 using MachineHealthExplorer.Agent.MultiAgent;
+using MachineHealthExplorer.Logging.Abstractions;
 using Microsoft.Extensions.Logging;
 
 namespace MachineHealthExplorer.Agent.Services;
@@ -13,14 +14,16 @@ public sealed class LmStudioAgentOrchestrator : IAgentOrchestrator
         AgentOptions options,
         IAgentChatClient chatClient,
         IAgentToolRuntime toolRuntime,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IChatSessionLogger chatSessionLogger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(chatClient);
         ArgumentNullException.ThrowIfNull(toolRuntime);
         ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(chatSessionLogger);
         var engineLogger = loggerFactory.CreateLogger("MachineHealthExplorer.Agent.MultiAgentSessionEngine");
-        _engine = new MultiAgentSessionEngine(options, chatClient, toolRuntime, engineLogger);
+        _engine = new MultiAgentSessionEngine(options, chatClient, toolRuntime, engineLogger, chatSessionLogger);
     }
 
     public Task<IReadOnlyList<ToolRegistrationDescriptor>> DescribeToolsAsync(CancellationToken cancellationToken = default)

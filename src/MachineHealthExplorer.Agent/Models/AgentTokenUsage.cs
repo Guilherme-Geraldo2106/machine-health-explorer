@@ -6,4 +6,5 @@ public sealed record AgentTokenUsage
     public int CompletionTokens { get; init; }
     public int TotalTokens { get; init; }
     public int? ReasoningTokens { get; init; }
+    public int? CachedPromptTokens { get; init; }
 }

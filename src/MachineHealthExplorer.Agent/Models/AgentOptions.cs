@@ -78,15 +78,28 @@ public sealed record MultiAgentOrchestrationOptions
     /// </summary>
     public int SpecialistToolSelectionPlannerMaxRecoveryAttempts { get; init; } = 2;
     /// <summary>
+    /// When the filtered specialist tool catalog has at most this many tools and the first tool-enabled turn already satisfies the safe completion budget, skip the separate tool-selection planner LLM.
+    /// </summary>
+    public int SpecialistToolPlannerSkipWhenCatalogSizeAtMost { get; init; } = 8;
+    /// <summary>
+    /// After a tool-enabled turn returns finish_reason=length without tool_calls, at most this many direct recovery attempts (no planner) run before failing with a technical message.
+    /// </summary>
+    public int SpecialistToolTurnLengthRecoveryMaxAttempts { get; init; } = 1;
+    /// <summary>
     /// Extra user turns asking for dataset query evidence when only structural tools ran but the dispatch expects metrics.
     /// </summary>
-    public int SpecialistMaxStructuralEvidenceRecoveryUserTurns { get; init; }
+    public int SpecialistMaxStructuralEvidenceRecoveryUserTurns { get; init; } = 2;
     public SpecialistAgentOptions Discovery { get; init; } = new();
     public SpecialistAgentOptions QueryAnalysis { get; init; } = new();
     public SpecialistAgentOptions FailureAnalysis { get; init; } = new();
     public SpecialistAgentOptions Reporting { get; init; } = new();
     public string CoordinatorSystemPromptExtension { get; init; } = string.Empty;
     public string FinalComposerSystemPromptExtension { get; init; } = string.Empty;
+    /// <summary>
+    /// Extra completion headroom for reasoning-heavy models on the final non-tool composer pass (within max_tokens).
+    /// When 0, the host <c>AgentOptions.ReasoningReserveTokens</c> value is used for final composer sizing.
+    /// </summary>
+    public int FinalComposerReasoningReserveTokens { get; init; }
 }
 
 public sealed record AgentOptions
@@ -104,7 +117,7 @@ public sealed record AgentOptions
     public int MinAssistantCompletionTokens { get; init; } = 448;
     public int MaxToolIterations { get; init; } = 6;
     public string SystemPrompt { get; init; } = string.Empty;
-    public int MaxContinuationRounds { get; init; } = 8;
+    public int MaxContinuationRounds { get; init; } = 3;
     public int MaxConversationMessages { get; init; } = 40;
     public bool EnableContextCompaction { get; init; } = true;
     public bool EnableWorkerPasses { get; init; } = false;
@@ -113,6 +126,11 @@ public sealed record AgentOptions
     /// When false (default), memory is refreshed only after tool execution rounds, reducing latency and cost.
     /// </summary>
     public bool EnableMemoryWorkerAfterFinalAnswer { get; init; }
+    /// <summary>
+    /// When true, runs the structured memory worker LLM pass after specialist tools and before the final composer.
+    /// When false (default), memory is updated heuristically from tool executions only (no extra LLM) before the final answer.
+    /// </summary>
+    public bool EnableMemoryWorkerBeforeFinalAnswer { get; init; }
     public int MaxWorkerPasses { get; init; } = 3;
     public int MemorySummaryMaxLength { get; init; } = 6000;
     /// <summary>Maximum characters stored per tool digest in <see cref="AgentConversationMemory.ToolEvidenceDigests"/>.</summary>
@@ -144,4 +162,16 @@ public sealed record AgentOptions
     public int ToolPlannerMaxNamedTools { get; init; } = 16;
     public int MaxToolSchemaCharsPerTool { get; init; } = 900;
     public MultiAgentOrchestrationOptions MultiAgent { get; init; } = new();
+    /// <summary>
+    /// When true, workers that emit JSON may send <c>response_format=json_schema</c> to compatible backends; unsupported backends fall back automatically.
+    /// </summary>
+    public bool EnableStructuredJsonOutputs { get; init; } = true;
+    /// <summary>
+    /// When true with <see cref="EnableStructuredJsonOutputs"/>, sets <c>strict: true</c> on json_schema envelopes (requires provider support).
+    /// </summary>
+    public bool UseStrictJsonSchemaInResponseFormat { get; init; }
+    /// <summary>
+    /// When true, tool definitions may be sent with <c>strict: true</c> on function parameters (schema must be fully closed).
+    /// </summary>
+    public bool EnableStrictToolParameterSchemas { get; init; }
 }

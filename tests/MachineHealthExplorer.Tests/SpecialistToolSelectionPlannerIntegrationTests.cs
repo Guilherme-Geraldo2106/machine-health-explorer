@@ -20,11 +20,17 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
         var options = new AgentOptions
         {
             Model = "m",
+            HostContextTokens = 64_000,
+            ContextSlotTokens = 64_000,
+            ContextSafetyMarginTokens = 256,
+            EnableStructuredJsonOutputs = false,
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                SpecialistToolPlannerSkipWhenCatalogSizeAtMost = 0,
                 EnableSpecialistToolSelectionPlanning = true,
                 SpecialistMaxToolIterations = 6,
                 SpecialistToolCallMaxOutputTokens = 900,
+                ToolTurnMinOutputTokens = 256,
                 SpecialistRecoveryPreferToolChoiceRequired = false,
                 SpecialistProviderSupportsToolChoiceRequired = true
             }
@@ -100,6 +106,7 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                SpecialistToolPlannerSkipWhenCatalogSizeAtMost = 0,
                 EnableSpecialistToolSelectionPlanning = true,
                 SpecialistToolSelectionPlannerMaxRecoveryAttempts = 2,
                 SpecialistMaxToolIterations = 5,
@@ -158,6 +165,7 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
             ContextBudgetCharsPerToken = 2,
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                SpecialistToolPlannerSkipWhenCatalogSizeAtMost = 0,
                 EnableSpecialistToolSelectionPlanning = true,
                 SpecialistMaxToolIterations = 4,
                 SpecialistToolCallMaxOutputTokens = 900,
@@ -220,6 +228,7 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                SpecialistToolPlannerSkipWhenCatalogSizeAtMost = 0,
                 EnableSpecialistToolSelectionPlanning = true,
                 SpecialistMaxToolIterations = 7,
                 SpecialistToolCallMaxOutputTokens = 900,
@@ -246,7 +255,6 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
                 FinishReason = "length",
                 ToolCalls = []
             },
-            new AgentModelResponse { Model = "m", Content = """{"need_tools":true,"tools":["group_and_aggregate"],"reason":"c"}""", FinishReason = "stop" },
             new AgentModelResponse
             {
                 Model = "m",
@@ -280,8 +288,7 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
         var requiredTurn = chat.Requests.FirstOrDefault(r =>
             r.EnableTools
             && r.RequireToolCall
-            && r.Tools.Count == 1
-            && r.Tools[0].Name.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
+            && r.Tools.Any(t => t.Name.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase)));
         Assert.NotNull(requiredTurn);
 
         var multiSurface = chat.Requests.FirstOrDefault(r =>
@@ -299,6 +306,7 @@ public sealed class SpecialistToolSelectionPlannerIntegrationTests
             Model = "m",
             MultiAgent = new MultiAgentOrchestrationOptions
             {
+                SpecialistToolPlannerSkipWhenCatalogSizeAtMost = 0,
                 EnableSpecialistToolSelectionPlanning = true,
                 SpecialistMaxToolIterations = 4,
                 SpecialistToolCallMaxOutputTokens = 900,

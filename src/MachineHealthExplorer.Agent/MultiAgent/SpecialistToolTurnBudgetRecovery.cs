@@ -10,6 +10,7 @@ internal static class SpecialistToolTurnBudgetRecovery
     /// </summary>
     public static readonly HashSet<string> EvidenceContinuationToolNames = new(StringComparer.OrdinalIgnoreCase)
     {
+        "describe_dataset",
         "get_schema",
         "search_columns",
         "group_and_aggregate",
@@ -21,9 +22,8 @@ internal static class SpecialistToolTurnBudgetRecovery
     public static bool ShouldNarrowToEvidenceContinuationSurface(
         AgentTaskRequest request,
         IReadOnlyList<AgentToolExecutionRecord> executedTools)
-        => request.ExpectsDatasetQueryEvidence
-           && SpecialistDatasetEvidencePolicy.AllowlistOffersDatasetQueryEvidence(request.AllowedTools)
-           && !SpecialistDatasetEvidencePolicy.HasSuccessfulDatasetQueryEvidence(executedTools);
+        => SpecialistDatasetEvidencePolicy.AllowlistOffersDatasetQueryEvidence(request.AllowedTools)
+           && SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools).Count > 0;
 
     public static string[] IntersectAllowedWithEvidenceContinuation(IEnumerable<string> allowedNames)
     {

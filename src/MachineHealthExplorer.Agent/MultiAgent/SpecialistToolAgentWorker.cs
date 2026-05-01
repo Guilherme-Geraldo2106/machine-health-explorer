@@ -1,6 +1,11 @@
+using System.Diagnostics;
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.Serialization;
 using MachineHealthExplorer.Agent.Services;
+using MachineHealthExplorer.Logging.Abstractions;
+using MachineHealthExplorer.Logging.Models;
+using MachineHealthExplorer.Logging.Services;
 using Microsoft.Extensions.Logging;
 
 namespace MachineHealthExplorer.Agent.MultiAgent;
@@ -19,18 +24,21 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
     private readonly IAgentToolRuntime _toolRuntime;
     private readonly IAgentChatClient _chatClient;
     private readonly ILogger _logger;
+    private readonly IChatSessionLogger _chatSessionLogger;
     private readonly SpecialistToolSelectionPlanner _specialistToolSelectionPlanner;
 
     public SpecialistToolAgentWorker(
         AgentOptions options,
         IAgentToolRuntime toolRuntime,
         IAgentChatClient chatClient,
-        ILogger logger)
+        ILogger logger,
+        IChatSessionLogger? chatSessionLogger = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _toolRuntime = toolRuntime ?? throw new ArgumentNullException(nameof(toolRuntime));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _chatSessionLogger = chatSessionLogger ?? NullChatSessionLogger.Instance;
         _specialistToolSelectionPlanner = new SpecialistToolSelectionPlanner(options, chatClient, logger);
     }
 
@@ -73,6 +81,9 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
         var injectedMinimalContractAfterPlannerFallback = false;
         var requireToolCallNextTurn = false;
         AgentTokenUsage? lastToolTurnUsage = null;
+        var plannerSuppressedForLengthRecovery = false;
+        IReadOnlyList<AgentToolDefinition>? recoveryToolSurface = null;
+        var toolTurnLengthRecoveriesAttempted = 0;
 
         if (!request.UseFullToolSchemas)
         {
@@ -87,8 +98,25 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
         var maxIterations = Math.Max(1, _options.MultiAgent.SpecialistMaxToolIterations);
         for (var iteration = 0; iteration < maxIterations; iteration++)
         {
-            var catalogToolNames = string.Join(", ", scopedTools.Select(t => t.Name));
-            var toolsExposedForModelTurn = scopedTools;
+            var missingEvidenceKinds = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
+            var explicitEvidencePlan = request.RequiredEvidenceKinds is { Count: > 0 };
+            var narrowedCatalog = explicitEvidencePlan
+                ? SpecialistDatasetEvidencePolicy.FilterToolsSatisfyingAnyKind(scopedTools, missingEvidenceKinds)
+                : scopedTools;
+            var toolsForTurn = explicitEvidencePlan
+                               && narrowedCatalog.Count > 0
+                               && narrowedCatalog.Count < scopedTools.Count
+                               && missingEvidenceKinds.Count > 0
+                ? narrowedCatalog
+                : scopedTools;
+
+            var catalogToolNames = string.Join(", ", toolsForTurn.Select(t => t.Name));
+            var toolsExposedForModelTurn = toolsForTurn;
+            if (plannerSuppressedForLengthRecovery && recoveryToolSurface is { Count: > 0 })
+            {
+                toolsExposedForModelTurn = recoveryToolSurface;
+            }
+
             var useMinimalForToolCallRequest = useMinimalToolSchemas;
             var plannerUsedSuccessfulSubset = false;
             string? plannerFailureDetail = null;
@@ -99,11 +127,22 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 conversation,
                 scopedTools);
 
-            if (scopedTools.Count > 0 && _options.MultiAgent.EnableSpecialistToolSelectionPlanning)
+            var skipToolSelectionPlanner =
+                requireToolCallNextTurn
+                || plannerSuppressedForLengthRecovery
+                || ShouldOmitPlannerDueToSmallCatalogAndBudget(
+                    request,
+                    conversation,
+                    toolsForTurn,
+                    safeFloor,
+                    lastToolTurnUsage,
+                    hasExecutedAnyTool: executedTools.Count > 0);
+
+            if (scopedTools.Count > 0 && _options.MultiAgent.EnableSpecialistToolSelectionPlanning && !skipToolSelectionPlanner)
             {
                 var memoryCompact = AgentEphemeralWorkerRunner.FormatMemoryBlock(request.CoordinatorMemory);
                 var executedSummary = SpecialistToolTurnBudgetRecovery.BuildExecutedToolsSummary(executedTools);
-                var compactCatalog = scopedTools.Select(t => (t.Name, t.Description)).ToArray();
+                var compactCatalog = toolsForTurn.Select(t => (t.Name, t.Description)).ToArray();
 
                 var plannerOutcome = await _specialistToolSelectionPlanner.SelectToolsForNextStepAsync(
                         model,
@@ -127,14 +166,18 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                         AgentPromptBudgetGuard.CompactPlain(plannerOutcome.Reason ?? string.Empty, 220),
                         catalogToolNames);
 
-                    if (SpecialistDatasetEvidencePolicy.ShouldPromptForMoreDatasetQueryEvidence(request, executedTools)
+                    if (missingEvidenceKinds.Count > 0
                         && structuralEvidenceRecoveriesRemaining > 0)
                     {
                         structuralEvidenceRecoveriesRemaining--;
                         conversation.Add(new AgentConversationMessage
                         {
                             Role = AgentConversationRole.User,
-                            Content = BuildDatasetStructuralRecoveryUserContent(request.UseFullToolSchemas)
+                            Content = BuildEvidenceKindsModelDrivenRecoveryUserContent(
+                                request,
+                                executedTools,
+                                toolsForTurn.Select(t => t.Name).ToArray(),
+                                request.UseFullToolSchemas)
                         });
                         requireToolCallNextTurn = true;
                         continue;
@@ -341,10 +384,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
 
             var recoveryPreferenceOk = _options.MultiAgent.SpecialistRecoveryPreferToolChoiceRequired
                 && _options.MultiAgent.SpecialistProviderSupportsToolChoiceRequired;
-            var needsDatasetEvidence =
-                request.ExpectsDatasetQueryEvidence
-                && SpecialistDatasetEvidencePolicy.AllowlistOffersDatasetQueryEvidence(request.AllowedTools)
-                && !SpecialistDatasetEvidencePolicy.HasSuccessfulDatasetQueryEvidence(executedTools);
+            var needsDatasetEvidence = missingEvidenceKinds.Count > 0;
 
             var requireToolCallThisTurn =
                 toolsExposedForModelTurn.Count > 0
@@ -357,7 +397,12 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                         && (requireToolCallNextTurn || needsDatasetEvidence))
                     || (
                         (!_options.MultiAgent.EnableSpecialistToolSelectionPlanning || !plannerUsedSuccessfulSubset)
-                        && requireToolCallNextTurn));
+                        && requireToolCallNextTurn)
+                    || plannerSuppressedForLengthRecovery);
+
+            var disableParallelToolCalls =
+                toolsExposedForModelTurn.Count > 0
+                && (requireToolCallThisTurn || plannerSuppressedForLengthRecovery || toolsExposedForModelTurn.Count <= 1);
 
             _logger.LogInformation(
                 "Specialist {Specialist} iteration={Iteration} require_tool_call={Require} planner_subset={Subset}",
@@ -379,7 +424,8 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     MaxOutputTokens = toolTurnMaxOut,
                     EnableTools = toolsExposedForModelTurn.Count > 0,
                     UseMinimalToolSchemas = useMinimalForToolCallRequest,
-                    RequireToolCall = requireToolCallThisTurn
+                    RequireToolCall = requireToolCallThisTurn,
+                    ParallelToolCalls = disableParallelToolCalls ? false : null
                 }, cancellationToken).ConfigureAwait(false);
             }
             catch (AgentModelBackendException ex) when (ex.IsContextLengthExceeded)
@@ -440,6 +486,9 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             if (response.ToolCalls.Count > 0)
             {
                 requireToolCallNextTurn = false;
+                plannerSuppressedForLengthRecovery = false;
+                recoveryToolSurface = null;
+                toolTurnLengthRecoveriesAttempted = 0;
                 conversation.Add(new AgentConversationMessage
                 {
                     Role = AgentConversationRole.Assistant,
@@ -449,14 +498,11 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
 
                 foreach (var toolCall in response.ToolCalls)
                 {
+                    var sw = Stopwatch.StartNew();
                     var execution = await scopedRuntime.ExecuteAsync(toolCall.Name, toolCall.ArgumentsJson, cancellationToken).ConfigureAwait(false);
+                    sw.Stop();
                     executedTools.Add(execution);
-                    _logger.LogInformation(
-                        "Specialist {Specialist} executed tool {Tool} is_error={IsError}",
-                        kind,
-                        execution.ToolName,
-                        execution.IsError);
-
+                    var originalLen = (execution.ResultJson ?? string.Empty).Length;
                     var evidenceBudget = AgentToolEvidenceCompressor.ComputeMaxToolEvidenceChars(
                         _options,
                         AgentContextBudgetEstimator.EstimatePromptTokens(
@@ -464,19 +510,48 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                             request.SpecialistSystemPrompt,
                             conversation,
                             toolsExposedForModelTurn));
-                    var toolMessageContent = execution.IsError
+                    var preview = execution.IsError
                         ? SpecialistToolFailureFeedback.BuildToolResultJson(toolCall, execution, scopedTools)
                         : AgentToolEvidenceCompressor.BuildToolMessageContent(
                             toolCall.Name,
-                            execution.ResultJson,
+                            execution.ResultJson ?? "{}",
                             evidenceBudget);
+                    _logger.LogInformation(
+                        "Specialist {Specialist} executed tool {Tool} is_error={IsError} args_len={ArgsLen} result_len={ResLen} preview_len={PrevLen} elapsed_ms={Ms}",
+                        kind,
+                        execution.ToolName,
+                        execution.IsError,
+                        toolCall.ArgumentsJson.Length,
+                        originalLen,
+                        preview.Length,
+                        sw.Elapsed.TotalMilliseconds);
+
+                    _chatSessionLogger.Append(new ChatSessionLogEvent(
+                        default,
+                        string.Empty,
+                        "agent.tool_execution",
+                        "internal",
+                        model,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        ToolExecution: new ChatToolExecutionLog(
+                            execution.ToolName,
+                            toolCall.ArgumentsJson.Length,
+                            originalLen,
+                            preview.Length,
+                            execution.IsError,
+                            sw.Elapsed.TotalMilliseconds)));
 
                     conversation.Add(new AgentConversationMessage
                     {
                         Role = AgentConversationRole.Tool,
                         Name = toolCall.Name,
                         ToolCallId = toolCall.Id,
-                        Content = toolMessageContent
+                        Content = preview
                     });
                 }
 
@@ -487,16 +562,46 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             if (truncatedWithoutTools)
             {
                 encounteredTruncationWithoutTools = true;
-                conversation.Add(new AgentConversationMessage
+                var maxLengthRecoveries = Math.Max(0, _options.MultiAgent.SpecialistToolTurnLengthRecoveryMaxAttempts);
+                if (toolTurnLengthRecoveriesAttempted < maxLengthRecoveries)
                 {
-                    Role = AgentConversationRole.User,
-                    Content = BuildLengthTruncationRecoveryUserMessage(executedTools)
-                });
-                requireToolCallNextTurn = true;
-                continue;
+                    toolTurnLengthRecoveriesAttempted++;
+                    recoveryToolSurface = toolsExposedForModelTurn;
+                    plannerSuppressedForLengthRecovery = true;
+                    var targetChars = Math.Max(
+                        256,
+                        AgentToolEvidenceCompressor.ComputeMaxToolEvidenceChars(
+                            _options,
+                            AgentContextBudgetEstimator.EstimatePromptTokens(
+                                _options,
+                                request.SpecialistSystemPrompt,
+                                conversation,
+                                toolsExposedForModelTurn)) / 2);
+                    AgentToolEvidenceCompressor.CompactToolMessagesInConversation(conversation, targetChars);
+                    conversation.Add(new AgentConversationMessage
+                    {
+                        Role = AgentConversationRole.User,
+                        Content = BuildLengthTruncationRecoveryUserMessage(executedTools)
+                    });
+                    requireToolCallNextTurn = true;
+                    continue;
+                }
+
+                var truncatedOutput = SpecialistStructuredOutputParser.FromToolFallback(
+                    kind,
+                    executedTools,
+                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                return new AgentTaskResult(
+                    kind,
+                    Success: executedTools.Count > 0,
+                    FailureMessage:
+                    "Rodada com tools truncada (finish_reason=length) sem tool_calls após recuperação direta; orçamento ou modelo não emitiu JSON de tool a tempo.",
+                    executedTools,
+                    truncatedOutput,
+                    conversation.ToArray());
             }
 
-            if (SpecialistDatasetEvidencePolicy.ShouldPromptForMoreDatasetQueryEvidence(request, executedTools)
+            if (missingEvidenceKinds.Count > 0
                 && structuralEvidenceRecoveriesRemaining > 0
                 && !IsCompactDoneNoMoreToolsSignal(response))
             {
@@ -505,18 +610,25 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 conversation.Add(new AgentConversationMessage
                 {
                     Role = AgentConversationRole.User,
-                    Content = BuildDatasetStructuralRecoveryUserContent(request.UseFullToolSchemas)
+                    Content = BuildEvidenceKindsModelDrivenRecoveryUserContent(
+                        request,
+                        executedTools,
+                        toolsForTurn.Select(t => t.Name).ToArray(),
+                        request.UseFullToolSchemas)
                 });
                 requireToolCallNextTurn = true;
                 continue;
             }
 
+            if (IsCompactDoneNoMoreToolsSignal(response))
+            {
+                plannerSuppressedForLengthRecovery = false;
+                recoveryToolSurface = null;
+            }
+
             AppendAssistantTurnFromModel(conversation, response);
 
-            var insufficientDatasetEvidenceForSynthesis =
-                request.ExpectsDatasetQueryEvidence
-                && SpecialistDatasetEvidencePolicy.AllowlistOffersDatasetQueryEvidence(request.AllowedTools)
-                && !SpecialistDatasetEvidencePolicy.HasSuccessfulDatasetQueryEvidence(executedTools);
+            var insufficientDatasetEvidenceForSynthesis = missingEvidenceKinds.Count > 0;
 
             var (synthesisRetryToolLoop, structuredMaybe) = await TrySynthesizeStructuredOutputAsync(
                     kind,
@@ -713,16 +825,48 @@ Continue now: emit exactly one valid tool call if more data is needed, or reply 
 """;
     }
 
-    private static string BuildDatasetStructuralRecoveryUserContent(bool useFullToolSchemas)
+    internal static string BuildEvidenceKindsModelDrivenRecoveryUserContent(
+        AgentTaskRequest request,
+        IReadOnlyList<AgentToolExecutionRecord> executedTools,
+        IReadOnlyList<string> availableToolNames,
+        bool useFullToolSchemas)
     {
-        var preamble = """
-You only have structural metadata (schema/column search) in the transcript. If a downstream answer still needs aggregates, profiles, distinct values, row samples, or similar dataset-backed evidence, emit exactly one valid tool call now. If no further tools are required, reply with exactly this single line and nothing else: DONE_NO_MORE_TOOLS
+        var missing = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
+        var collected = SpecialistDatasetEvidencePolicy.GetSatisfiedEvidenceKinds(executedTools)
+            .OrderBy(k => k.ToString(), StringComparer.Ordinal)
+            .Select(k => k.ToString())
+            .ToArray();
 
-""";
+        var requiredLine = missing.Count > 0
+            ? string.Join(", ", missing.Select(m => m.ToString()).Distinct())
+            : "(none)";
+
+        var collectedLine = collected.Length > 0
+            ? string.Join(", ", collected)
+            : "(none)";
+
+        var catalogLine = availableToolNames.Count > 0
+            ? string.Join(", ", availableToolNames.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+            : "(none)";
+
         var contract = useFullToolSchemas
             ? MultiAgentPromptBuilder.BuildGroupAndAggregateCompactContractHint()
             : "Follow the earlier reduced-schema user message for exact group_and_aggregate shapes (groupByBins as an array of { columnName, alias, binWidth }; Count without per-aggregation filter = all rows in the group; Count with filter = subset count; use separate aggregations/aliases such as row_count and event_count when both are needed).";
-        return preamble + contract;
+
+        return $"""
+Evidence recovery (model-driven routing only; do not answer the end user here).
+
+Still required generic evidence categories (not yet satisfied): {requiredLine}
+Already collected generic evidence categories: {collectedLine}
+Available generic tool names in this turn (names only): {catalogLine}
+
+Emit exactly one valid tool call using the exposed tools, or reply with exactly this single line and nothing else:
+DONE_NO_MORE_TOOLS
+
+If you choose DONE_NO_MORE_TOOLS, add a single technical justification line explaining why no further tool is appropriate.
+
+{contract}
+""";
     }
 
     private async Task<AgentTaskResult?> TryReturnAfterStructuredSynthesisAsync(
@@ -736,9 +880,7 @@ You only have structural metadata (schema/column search) in the transcript. If a
         CancellationToken cancellationToken)
     {
         var insufficientDatasetEvidenceForSynthesis =
-            request.ExpectsDatasetQueryEvidence
-            && SpecialistDatasetEvidencePolicy.AllowlistOffersDatasetQueryEvidence(request.AllowedTools)
-            && !SpecialistDatasetEvidencePolicy.HasSuccessfulDatasetQueryEvidence(executedTools);
+            SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools).Count > 0;
 
         var (synthesisRetryToolLoop, structuredMaybe) = await TrySynthesizeStructuredOutputAsync(
                 kind,
@@ -814,6 +956,19 @@ You only have structural metadata (schema/column search) in the transcript. If a
 
         var estimatedPrompt = AgentContextBudgetEstimator.EstimatePromptTokens(_options, synthesisSystem, scratch, Array.Empty<AgentToolDefinition>());
         var maxOut = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(_options, estimatedPrompt, reasoningPressureSteps: 0, lastUsage: null);
+        if (maxOut <= 0)
+        {
+            _logger.LogWarning(
+                "Specialist {Specialist} structured synthesis skipped: insufficient assistant completion budget (max_out=0).",
+                kind);
+            return (
+                RetryToolLoop: false,
+                SpecialistStructuredOutputParser.FromToolFallback(
+                    kind,
+                    toolExecutions,
+                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200)));
+        }
+
         maxOut = Math.Min(maxOut, Math.Max(256, _options.MultiAgent.SpecialistSynthesisMaxOutputTokens));
 
         AgentModelResponse response;
@@ -827,7 +982,16 @@ You only have structural metadata (schema/column search) in the transcript. If a
                 Tools = Array.Empty<AgentToolDefinition>(),
                 Temperature = Math.Min(0.25, _options.WorkerTemperature),
                 MaxOutputTokens = maxOut,
-                EnableTools = false
+                EnableTools = false,
+                ResponseFormat = _options.EnableStructuredJsonOutputs
+                    ? new AgentJsonSchemaResponseFormat
+                    {
+                        Type = "json_schema",
+                        Name = AgentStructuredOutputJsonSchemas.SpecialistStructuredSynthesisSchemaName,
+                        Strict = _options.UseStrictJsonSchemaInResponseFormat,
+                        SchemaJson = AgentStructuredOutputJsonSchemas.SpecialistStructuredSynthesis.Trim()
+                    }
+                    : null
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -864,16 +1028,15 @@ You only have structural metadata (schema/column search) in the transcript. If a
                 digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200)));
     }
 
-    private static void AppendAssistantTurnFromModel(List<AgentConversationMessage> conversation, AgentModelResponse response)
+    internal static void AppendAssistantTurnFromModel(List<AgentConversationMessage> conversation, AgentModelResponse response)
     {
-        var surface = AgentToolScopePlanner.CombinePlannerSurface(response.Content, response.ReasoningContent);
-        var stripped = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(surface);
-        if (string.IsNullOrWhiteSpace(stripped) && string.IsNullOrWhiteSpace(surface))
+        var stripped = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content);
+        if (string.IsNullOrWhiteSpace(stripped) && string.IsNullOrWhiteSpace(response.Content))
         {
             return;
         }
 
-        var content = string.IsNullOrWhiteSpace(stripped) ? surface.Trim() : stripped;
+        var content = string.IsNullOrWhiteSpace(stripped) ? (response.Content ?? string.Empty).Trim() : stripped;
         conversation.Add(new AgentConversationMessage
         {
             Role = AgentConversationRole.Assistant,
@@ -883,8 +1046,7 @@ You only have structural metadata (schema/column search) in the transcript. If a
 
     private static bool IsCompactDoneNoMoreToolsSignal(AgentModelResponse response)
     {
-        var surface = AgentToolScopePlanner.CombinePlannerSurface(response.Content, response.ReasoningContent);
-        var stripped = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(surface)?.Trim();
+        var stripped = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content)?.Trim();
         return stripped is not null
                && stripped.Equals(CompactDoneNoMoreToolsToken, StringComparison.OrdinalIgnoreCase);
     }
@@ -920,6 +1082,11 @@ Instructions:
             _options,
             estimatedPromptTokens,
             lastUsage: lastUsage);
+        if (effective <= 0)
+        {
+            return 0;
+        }
+
         var cap = Math.Max(128, _options.MultiAgent.SpecialistToolCallMaxOutputTokens);
         var merged = Math.Min(effective, cap);
         if (request.ToolTurnMaxOutputTokensCap is { } hardCap)
@@ -928,6 +1095,34 @@ Instructions:
         }
 
         return merged;
+    }
+
+    private bool ShouldOmitPlannerDueToSmallCatalogAndBudget(
+        AgentTaskRequest request,
+        List<AgentConversationMessage> conversation,
+        IReadOnlyList<AgentToolDefinition> scopedTools,
+        int safeFloor,
+        AgentTokenUsage? lastToolTurnUsage,
+        bool hasExecutedAnyTool)
+    {
+        if (hasExecutedAnyTool && request.ExpectsDatasetQueryEvidence)
+        {
+            return false;
+        }
+
+        var maxCatalog = Math.Max(0, _options.MultiAgent.SpecialistToolPlannerSkipWhenCatalogSizeAtMost);
+        if (scopedTools.Count == 0 || scopedTools.Count > maxCatalog)
+        {
+            return false;
+        }
+
+        var estimated = AgentContextBudgetEstimator.EstimatePromptTokens(
+            _options,
+            request.SpecialistSystemPrompt,
+            conversation,
+            scopedTools);
+        var toolTurnMaxOut = ComputeToolCallMaxOutputTokens(estimated, request, lastToolTurnUsage);
+        return toolTurnMaxOut >= safeFloor;
     }
 
     private static string BuildSynthesisSystemPrompt(AgentSpecialistKind kind, string specialistSystemPrompt)

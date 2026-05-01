@@ -1,5 +1,6 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.Serialization;
 using MachineHealthExplorer.Agent.Services;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
@@ -87,7 +88,16 @@ internal sealed class CoordinatorAgent
                     Tools = Array.Empty<AgentToolDefinition>(),
                     Temperature = _options.WorkerTemperature,
                     MaxOutputTokens = maxOut,
-                    EnableTools = false
+                    EnableTools = false,
+                    ResponseFormat = _options.EnableStructuredJsonOutputs
+                        ? new AgentJsonSchemaResponseFormat
+                        {
+                            Type = "json_schema",
+                            Name = AgentStructuredOutputJsonSchemas.CoordinatorDispatchSchemaName,
+                            Strict = _options.UseStrictJsonSchemaInResponseFormat,
+                            SchemaJson = AgentStructuredOutputJsonSchemas.CoordinatorDispatch.Trim()
+                        }
+                        : null
                 }, cancellationToken).ConfigureAwait(false);
             }
             catch (AgentModelBackendException ex) when (ex.IsContextLengthExceeded)
@@ -153,7 +163,7 @@ internal sealed class CoordinatorAgent
             : $"\n{multi.CoordinatorSystemPromptExtension.Trim()}";
 
         const string jsonShape = """
-{"steps":[{"specialist":"Discovery|QueryAnalysis|FailureAnalysis|Reporting","reason":"short","parallel_group":0}],"notes":"optional"}
+{"steps":[{"specialist":"Discovery|QueryAnalysis|FailureAnalysis|Reporting","reason":"short","parallel_group":0,"expects_dataset_query_evidence":true,"required_evidence":["StructuralSchema","Profile","DistinctValues","RowSample","Aggregate"]}],"notes":"optional"}
 """;
 
         var recovery = string.IsNullOrWhiteSpace(validationError)
@@ -182,6 +192,7 @@ Return ONLY JSON with this exact shape:
 
 Rules:
 - Do not invent tool names here (routing only).
+{MultiAgentPromptBuilder.BuildCoordinatorEvidenceRoutingRules()}
 - Prefer Discovery before heavy quantitative work only when the user is exploring structure without a clear numeric question.
 - Use parallel_group: steps that may run concurrently should share the same group id; dependent waves should use increasing ids.
 - If the user asks multiple independent things, include multiple specialists and parallelize when safe.
@@ -288,11 +299,13 @@ Return ONLY the JSON dispatch plan for specialists.
                 var group = ReadInt(step, "parallel_group") ?? 0;
                 var expectsDatasetQueryEvidence = ReadNullableBool(step, "expects_dataset_query_evidence")
                     ?? kind != AgentSpecialistKind.Discovery;
+                var requiredEvidence = ReadRequiredEvidenceKinds(step);
                 steps.Add(new AgentDispatchStep(
                     kind,
                     string.IsNullOrWhiteSpace(reason) ? "llm_dispatch" : reason.Trim(),
                     group,
-                    expectsDatasetQueryEvidence));
+                    expectsDatasetQueryEvidence,
+                    requiredEvidence));
             }
 
             var notes = root.TryGetProperty("notes", out var notesElement) ? ReadString(notesElement) : string.Empty;
@@ -321,6 +334,39 @@ Return ONLY the JSON dispatch plan for specialists.
             AgentSpecialistKind.Reporting => multi.Reporting.Enabled,
             _ => false
         };
+
+    private static IReadOnlyList<AgentEvidenceKind>? ReadRequiredEvidenceKinds(JsonElement step)
+    {
+        if (!step.TryGetProperty("required_evidence", out var array) || array.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var list = new List<AgentEvidenceKind>();
+        foreach (var element in array.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var raw = element.GetString();
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            if (Enum.TryParse<AgentEvidenceKind>(raw.Trim(), ignoreCase: true, out var kind))
+            {
+                if (!list.Contains(kind))
+                {
+                    list.Add(kind);
+                }
+            }
+        }
+
+        return list.Count > 0 ? list : null;
+    }
 
     private static bool TryMapSpecialist(string text, out AgentSpecialistKind kind)
     {

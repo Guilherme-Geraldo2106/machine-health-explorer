@@ -1,5 +1,8 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Logging.Abstractions;
+using MachineHealthExplorer.Logging.Models;
+using MachineHealthExplorer.Logging.Services;
 using Microsoft.Extensions.Logging;
 
 namespace MachineHealthExplorer.Agent.Services;
@@ -10,6 +13,7 @@ internal sealed class AgentAssistantAnswerPipeline
     private readonly IAgentChatClient _chatClient;
     private readonly AgentEphemeralWorkerRunner _workerRunner;
     private readonly ILogger _logger;
+    private readonly IChatSessionLogger _chatSessionLogger;
     private AgentTokenUsage? _lastUsage;
     private int _reasoningPressure;
 
@@ -17,12 +21,14 @@ internal sealed class AgentAssistantAnswerPipeline
         AgentOptions options,
         IAgentChatClient chatClient,
         AgentEphemeralWorkerRunner workerRunner,
-        ILogger logger)
+        ILogger logger,
+        IChatSessionLogger? chatSessionLogger = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _workerRunner = workerRunner ?? throw new ArgumentNullException(nameof(workerRunner));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _chatSessionLogger = chatSessionLogger ?? NullChatSessionLogger.Instance;
     }
 
     public void ResetTelemetry()
@@ -80,14 +86,56 @@ internal sealed class AgentAssistantAnswerPipeline
 
             mem = await EnforceContextBudgetAsync(scratch, mem, model, systemPrompt, cancellationToken).ConfigureAwait(false);
 
-            var estimatedPrompt = AgentContextBudgetEstimator.EstimatePromptTokens(_options, systemPrompt, scratch, Array.Empty<AgentToolDefinition>());
-            var maxOut = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(_options, estimatedPrompt, _reasoningPressure, _lastUsage);
+            var floor = AgentContextBudgetEstimator.GetAssistantCompletionFloorTokens(_options);
+            var maxOut = 0;
+            for (var budgetLoop = 0; budgetLoop < 24; budgetLoop++)
+            {
+                var estimatedPrompt = AgentContextBudgetEstimator.EstimatePromptTokens(_options, systemPrompt, scratch, Array.Empty<AgentToolDefinition>());
+                maxOut = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(
+                    _options,
+                    estimatedPrompt,
+                    _reasoningPressure,
+                    _lastUsage,
+                    continuationAssistantPass: true);
+                if (maxOut >= floor)
+                {
+                    break;
+                }
+
+                if (scratch.Count <= 2)
+                {
+                    break;
+                }
+
+                mem = await CompactOldestMessagesOnceAsync(scratch, mem, model, cancellationToken).ConfigureAwait(false);
+            }
 
             _logger.LogInformation(
-                "Assistant continuation {Round}: prompt_est~{PromptEst} max_out={MaxOut}",
+                "Assistant continuation {Round}: max_out={MaxOut} floor={Floor}",
                 additionalCallsMade + 1,
-                estimatedPrompt,
-                maxOut);
+                maxOut,
+                floor);
+
+            if (maxOut == 0 || maxOut < floor)
+            {
+                _chatSessionLogger.Append(new ChatSessionLogEvent(
+                    default,
+                    string.Empty,
+                    "agent.continuation_cancelled",
+                    "internal",
+                    model,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    ContinuationBudgetDetail: $"max_out={maxOut};floor={floor};reason=budget"));
+                accumulated = AgentResponseMerger.MergeAssistantFragments(
+                    accumulated,
+                    "\n\n[Encerramento técnico: orçamento de contexto insuficiente para continuar sem violar o piso de max_tokens.]");
+                return (TrimAssistantMessage(accumulated), continuationExhausted: true);
+            }
 
             try
             {
@@ -108,7 +156,33 @@ internal sealed class AgentAssistantAnswerPipeline
                 mem = await CompactOldestMessagesOnceAsync(scratch, mem, model, cancellationToken).ConfigureAwait(false);
                 var coordinatorSystem = systemPrompt;
                 var estimatedRetry = AgentContextBudgetEstimator.EstimatePromptTokens(_options, coordinatorSystem, scratch, Array.Empty<AgentToolDefinition>());
-                var maxOutRetry = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(_options, estimatedRetry, _reasoningPressure, _lastUsage);
+                var maxOutRetry = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(
+                    _options,
+                    estimatedRetry,
+                    _reasoningPressure,
+                    _lastUsage,
+                    continuationAssistantPass: true);
+                if (maxOutRetry == 0 || maxOutRetry < floor)
+                {
+                    _chatSessionLogger.Append(new ChatSessionLogEvent(
+                        default,
+                        string.Empty,
+                        "agent.continuation_cancelled",
+                        "internal",
+                        model,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        ContinuationBudgetDetail: $"max_out={maxOutRetry};floor={floor};reason=context_error"));
+                    accumulated = AgentResponseMerger.MergeAssistantFragments(
+                        accumulated,
+                        "\n\n[Encerramento técnico: continuação cancelada após erro de contexto no backend.]");
+                    return (TrimAssistantMessage(accumulated), continuationExhausted: true);
+                }
+
                 current = await _chatClient.CompleteAsync(new AgentModelRequest
                 {
                     Model = model,
@@ -153,7 +227,7 @@ internal sealed class AgentAssistantAnswerPipeline
     {
         if (!AgentVisibleResponseNormalizer.NeedsVisibleRecovery(response))
         {
-            return response;
+            return response with { ReasoningContent = null };
         }
 
         _logger.LogWarning(
@@ -183,7 +257,7 @@ internal sealed class AgentAssistantAnswerPipeline
             };
         }
 
-        return recovered;
+        return recovered with { ReasoningContent = null };
     }
 
     private async Task<AgentConversationMemory> EnforceContextBudgetAsync(
@@ -199,11 +273,16 @@ internal sealed class AgentAssistantAnswerPipeline
         while (guard++ < 32)
         {
             var estimated = AgentContextBudgetEstimator.EstimatePromptTokens(_options, systemPrompt, conversation, Array.Empty<AgentToolDefinition>());
-            var maxOut = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(_options, estimated, _reasoningPressure, _lastUsage);
+            var maxOut = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(
+                _options,
+                estimated,
+                _reasoningPressure,
+                _lastUsage,
+                continuationAssistantPass: false);
             var softSlot = Math.Max(512, AgentContextBudgetEstimator.GetEffectiveHostContextTokens(_options) - _options.ContextSafetyMarginTokens);
 
             var messagePressure = _options.EnableContextCompaction && conversation.Count > _options.MaxConversationMessages;
-            var tokenPressure = _options.EnableTokenBudgetCompaction && estimated + maxOut > softSlot;
+            var tokenPressure = _options.EnableTokenBudgetCompaction && (maxOut == 0 || estimated + maxOut > softSlot);
 
             if (!messagePressure && !tokenPressure)
             {

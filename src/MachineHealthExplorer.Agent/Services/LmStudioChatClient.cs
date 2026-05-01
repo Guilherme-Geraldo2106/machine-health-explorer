@@ -44,47 +44,26 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var includeTools = request.EnableTools && request.Tools.Count > 0;
-        var payload = new
+        var wantStructured = _options.EnableStructuredJsonOutputs && request.ResponseFormat is not null;
+        try
         {
-            model = request.Model,
-            messages = request.Messages
-                .Select(ToApiMessage)
-                .Prepend(new
-                {
-                    role = "system",
-                    content = request.SystemPrompt
-                })
-                .ToArray(),
-            tools = !includeTools
-                ? null
-                : request.Tools.Select(tool =>
-                {
-                    var parametersNode = request.UseMinimalToolSchemas
-                        ? MinimalToolParametersTemplate.DeepClone()
-                        : JsonNode.Parse(tool.ParametersJsonSchema)!;
-                    OpenAiCompatibleToolParametersNormalizer.PrepareToolParametersSchema(parametersNode);
-                    return new
-                    {
-                        type = "function",
-                        function = new
-                        {
-                            name = tool.Name,
-                            description = tool.Description,
-                            parameters = parametersNode
-                        }
-                    };
-                }).ToArray(),
-            tool_choice = !includeTools
-                ? null
-                : request.RequireToolCall
-                    ? "required"
-                    : "auto",
-            temperature = request.Temperature,
-            max_tokens = request.MaxOutputTokens
-        };
+            return await SendChatCompletionCoreAsync(request, includeResponseFormat: wantStructured, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (InvalidOperationException exception) when (wantStructured
+                                                         && AgentModelBackendException.LooksLikeResponseFormatRejected(exception.Message))
+        {
+            return await SendChatCompletionCoreAsync(request, includeResponseFormat: false, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
 
-        var requestBodyJson = JsonSerializer.Serialize(payload, AgentJsonSerializer.Options);
+    private async Task<AgentModelResponse> SendChatCompletionCoreAsync(
+        AgentModelRequest request,
+        bool includeResponseFormat,
+        CancellationToken cancellationToken)
+    {
+        var requestBodyJson = BuildChatCompletionRequestJson(request, includeResponseFormat);
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
         {
             Content = new StringContent(
@@ -98,6 +77,7 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.ApiKey);
         }
 
+        var requestSummary = BuildLlmRequestSummary(request, includeResponseFormat);
         _chatSessionLogger.Append(new ChatSessionLogEvent(
             default,
             string.Empty,
@@ -109,7 +89,8 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
             requestBodyJson,
             null,
             null,
-            null));
+            null,
+            LlmRequestSummary: requestSummary));
 
         string content;
         HttpResponseMessage response;
@@ -179,6 +160,8 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
                 }
             }
 
+            var usageModel = MapUsage(completion.Usage);
+            var tokenLog = BuildCompletionTokenLog(usageModel, content);
             _chatSessionLogger.Append(new ChatSessionLogEvent(
                 default,
                 string.Empty,
@@ -190,7 +173,9 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
                 null,
                 content,
                 null,
-                null));
+                null,
+                LlmRequestSummary: requestSummary,
+                CompletionTokenUsage: tokenLog));
 
             return new AgentModelResponse
             {
@@ -199,9 +184,152 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
                 ReasoningContent = choice.Message.ReasoningContent,
                 FinishReason = choice.FinishReason ?? string.Empty,
                 ToolCalls = normalizedToolCalls,
-                Usage = MapUsage(completion.Usage)
+                Usage = usageModel
             };
         }
+    }
+
+    private string BuildChatCompletionRequestJson(AgentModelRequest request, bool includeResponseFormat)
+    {
+        var includeTools = request.EnableTools && request.Tools.Count > 0;
+        var root = new JsonObject
+        {
+            ["model"] = request.Model,
+            ["temperature"] = request.Temperature,
+            ["max_tokens"] = request.MaxOutputTokens
+        };
+
+        var messages = new JsonArray
+        {
+            new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = request.SystemPrompt
+            }
+        };
+
+        foreach (var message in request.Messages)
+        {
+            messages.Add(ToApiMessageNode(message));
+        }
+
+        root["messages"] = messages;
+
+        if (includeTools)
+        {
+            var tools = new JsonArray();
+            foreach (var tool in request.Tools)
+            {
+                var parametersNode = request.UseMinimalToolSchemas
+                    ? MinimalToolParametersTemplate.DeepClone()
+                    : JsonNode.Parse(tool.ParametersJsonSchema)!;
+                OpenAiCompatibleToolParametersNormalizer.PrepareToolParametersSchema(parametersNode);
+                var fn = new JsonObject
+                {
+                    ["name"] = tool.Name,
+                    ["description"] = tool.Description,
+                    ["parameters"] = parametersNode
+                };
+                if (_options.EnableStrictToolParameterSchemas)
+                {
+                    fn["strict"] = true;
+                }
+
+                tools.Add(new JsonObject
+                {
+                    ["type"] = "function",
+                    ["function"] = fn
+                });
+            }
+
+            root["tools"] = tools;
+            root["tool_choice"] = request.RequireToolCall ? "required" : "auto";
+            if (request.ParallelToolCalls == false)
+            {
+                root["parallel_tool_calls"] = false;
+            }
+        }
+
+        if (includeResponseFormat && request.ResponseFormat is { } rf)
+        {
+            JsonNode schemaNode;
+            try
+            {
+                schemaNode = JsonNode.Parse(string.IsNullOrWhiteSpace(rf.SchemaJson) ? "{}" : rf.SchemaJson)!;
+            }
+            catch (JsonException)
+            {
+                schemaNode = new JsonObject();
+            }
+
+            var strict = rf.Strict || _options.UseStrictJsonSchemaInResponseFormat;
+            root["response_format"] = new JsonObject
+            {
+                ["type"] = string.IsNullOrWhiteSpace(rf.Type) ? "json_schema" : rf.Type,
+                ["json_schema"] = new JsonObject
+                {
+                    ["name"] = string.IsNullOrWhiteSpace(rf.Name) ? "schema" : rf.Name,
+                    ["strict"] = strict,
+                    ["schema"] = schemaNode
+                }
+            };
+        }
+
+        return root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+    }
+
+    private static JsonObject ToApiMessageNode(AgentConversationMessage message)
+    {
+        var role = message.Role switch
+        {
+            AgentConversationRole.System => "system",
+            AgentConversationRole.User => "user",
+            AgentConversationRole.Assistant => "assistant",
+            AgentConversationRole.Tool => "tool",
+            _ => "user"
+        };
+
+        if (message.Role == AgentConversationRole.Assistant && message.ToolCalls.Count > 0)
+        {
+            var toolCalls = new JsonArray();
+            foreach (var toolCall in message.ToolCalls)
+            {
+                toolCalls.Add(new JsonObject
+                {
+                    ["id"] = toolCall.Id,
+                    ["type"] = "function",
+                    ["function"] = new JsonObject
+                    {
+                        ["name"] = toolCall.Name,
+                        ["arguments"] = toolCall.ArgumentsJson
+                    }
+                });
+            }
+
+            return new JsonObject
+            {
+                ["role"] = role,
+                ["content"] = string.IsNullOrWhiteSpace(message.Content) ? null : message.Content,
+                ["tool_calls"] = toolCalls
+            };
+        }
+
+        if (message.Role == AgentConversationRole.Tool)
+        {
+            return new JsonObject
+            {
+                ["role"] = role,
+                ["content"] = message.Content ?? string.Empty,
+                ["tool_call_id"] = message.ToolCallId,
+                ["name"] = message.Name
+            };
+        }
+
+        return new JsonObject
+        {
+            ["role"] = role,
+            ["content"] = message.Content ?? string.Empty
+        };
     }
 
     private static List<AgentToolCall> NormalizeApiToolCalls(
@@ -298,6 +426,64 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
         }
     }
 
+    private static ChatLlmRequestSummary BuildLlmRequestSummary(AgentModelRequest request, bool includeResponseFormat)
+    {
+        string? rfType = null;
+        string? rfName = null;
+        if (includeResponseFormat && request.ResponseFormat is { } rf)
+        {
+            rfType = rf.Type;
+            rfName = rf.Name;
+        }
+
+        string? toolChoice = null;
+        if (request.EnableTools && request.Tools.Count > 0)
+        {
+            toolChoice = request.RequireToolCall ? "required" : "auto";
+        }
+
+        return new ChatLlmRequestSummary(
+            request.MaxOutputTokens,
+            rfType,
+            rfName,
+            toolChoice,
+            request.ParallelToolCalls);
+    }
+
+    private static ChatCompletionTokenLog? BuildCompletionTokenLog(AgentTokenUsage? usage, string rawResponseJson)
+    {
+        if (usage is null)
+        {
+            return null;
+        }
+
+        return new ChatCompletionTokenLog(
+            usage.PromptTokens,
+            usage.CompletionTokens,
+            usage.TotalTokens,
+            usage.ReasoningTokens,
+            usage.CachedPromptTokens,
+            TryExtractPromptTokensDetailsJson(rawResponseJson));
+    }
+
+    private static string? TryExtractPromptTokensDetailsJson(string rawResponseJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(rawResponseJson);
+            if (document.RootElement.TryGetProperty("usage", out var usage)
+                && usage.TryGetProperty("prompt_tokens_details", out var details))
+            {
+                return details.GetRawText();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return null;
+    }
+
     private static AgentTokenUsage? MapUsage(ChatCompletionUsage? usage)
     {
         if (usage is null)
@@ -306,12 +492,14 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
         }
 
         var reasoning = usage.CompletionTokensDetails?.ReasoningTokens;
+        var cached = usage.PromptTokensDetails?.CachedTokens;
         return new AgentTokenUsage
         {
             PromptTokens = usage.PromptTokens,
             CompletionTokens = usage.CompletionTokens,
             TotalTokens = usage.TotalTokens,
-            ReasoningTokens = reasoning
+            ReasoningTokens = reasoning,
+            CachedPromptTokens = cached
         };
     }
 
@@ -324,54 +512,6 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
         return normalized.EndsWith("/", StringComparison.Ordinal)
             ? normalized
             : $"{normalized}/";
-    }
-
-    private static object ToApiMessage(AgentConversationMessage message)
-    {
-        var role = message.Role switch
-        {
-            AgentConversationRole.System => "system",
-            AgentConversationRole.User => "user",
-            AgentConversationRole.Assistant => "assistant",
-            AgentConversationRole.Tool => "tool",
-            _ => "user"
-        };
-
-        if (message.Role == AgentConversationRole.Assistant && message.ToolCalls.Count > 0)
-        {
-            return new
-            {
-                role,
-                content = string.IsNullOrWhiteSpace(message.Content) ? null : message.Content,
-                tool_calls = message.ToolCalls.Select(toolCall => new
-                {
-                    id = toolCall.Id,
-                    type = "function",
-                    function = new
-                    {
-                        name = toolCall.Name,
-                        arguments = toolCall.ArgumentsJson
-                    }
-                }).ToArray()
-            };
-        }
-
-        if (message.Role == AgentConversationRole.Tool)
-        {
-            return new
-            {
-                role,
-                content = message.Content ?? string.Empty,
-                tool_call_id = message.ToolCallId,
-                name = message.Name
-            };
-        }
-
-        return new
-        {
-            role,
-            content = message.Content ?? string.Empty
-        };
     }
 
     private sealed record ChatCompletionResponse
@@ -394,6 +534,15 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
 
         [JsonPropertyName("completion_tokens_details")]
         public ChatCompletionCompletionTokenDetails? CompletionTokensDetails { get; init; }
+
+        [JsonPropertyName("prompt_tokens_details")]
+        public ChatCompletionPromptTokenDetails? PromptTokensDetails { get; init; }
+    }
+
+    private sealed record ChatCompletionPromptTokenDetails
+    {
+        [JsonPropertyName("cached_tokens")]
+        public int? CachedTokens { get; init; }
     }
 
     private sealed record ChatCompletionCompletionTokenDetails

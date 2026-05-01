@@ -335,6 +335,78 @@ public sealed class MultiAgentModelDrivenTests
     }
 
     [Fact]
+    public async Task MultiAgentSessionEngine_FakeCombinationQuestion_RunsAggregateBeforeFinalComposer()
+    {
+        const string userQuestion =
+            "qual a combinação de fator que voce considera maior causador de falhas e desgaste na maquina ?";
+
+        var options = new AgentOptions
+        {
+            Model = "m",
+            HostContextTokens = 24_000,
+            ContextSlotTokens = 24_000,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableCoordinatorLlmPlanning = false,
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 6,
+                SpecialistMaxStructuralEvidenceRecoveryUserTurns = 2,
+                FinalComposerReasoningReserveTokens = 900
+            }
+        };
+
+        var chat = new ModelDrivenQueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = string.Empty,
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall
+                    {
+                        Id = "t1",
+                        Name = "group_and_aggregate",
+                        ArgumentsJson =
+                            """{"groupByColumns":[],"aggregations":[{"alias":"n","function":"Count"}],"pageSize":50}"""
+                    }
+                ]
+            },
+            new AgentModelResponse { Model = "m", Content = "DONE_NO_MORE_TOOLS", FinishReason = "stop" },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content =
+                    """{"relevantColumns":[],"ambiguities":[],"evidences":[],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}""",
+                FinishReason = "stop"
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content =
+                    "Com base nas contagens agregadas, o padrão observado é associação entre categorias, não causalidade forte.",
+                FinishReason = "stop"
+            });
+
+        var engine = new MinimalStubAnalyticsEngine();
+        var toolService = new DatasetToolService(engine);
+        var runtime = new DatasetAgentToolRuntime(new DatasetToolCatalog(), toolService);
+
+        var session = new MultiAgentSessionEngine(options, chat, runtime, NullLogger.Instance);
+        var result = await session.RunAsync(new AgentExecutionContext { UserInput = userQuestion }, CancellationToken.None);
+
+        Assert.Contains(
+            result.ToolExecutions,
+            execution =>
+                execution.ToolName.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase)
+                && !execution.IsError);
+
+        Assert.Contains("associação", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Encerramento técnico", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(chat.Requests.Count <= 7, $"expected few LLM calls, got {chat.Requests.Count}");
+    }
+
+    [Fact]
     public void FinalComposer_system_prompt_forbids_false_absence_claims_when_schema_hints_exist()
     {
         var prompt = MultiAgentPromptBuilder.BuildFinalComposerSystemPrompt(new AgentOptions());

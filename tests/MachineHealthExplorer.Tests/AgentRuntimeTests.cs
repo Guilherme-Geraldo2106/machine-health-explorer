@@ -4,6 +4,7 @@ using MachineHealthExplorer.Agent.MultiAgent;
 using MachineHealthExplorer.Agent.Serialization;
 using MachineHealthExplorer.Agent.Services;
 using MachineHealthExplorer.Domain.Models;
+using MachineHealthExplorer.Logging.Services;
 using MachineHealthExplorer.Tools.Abstractions;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
@@ -21,7 +22,8 @@ public sealed class AgentRuntimeTests
     /// </summary>
     private static readonly MultiAgentOrchestrationOptions MultiAgentStubQueue = new()
     {
-        EnableSpecialistToolSelectionPlanning = false
+        EnableSpecialistToolSelectionPlanning = false,
+        SpecialistMaxStructuralEvidenceRecoveryUserTurns = 0
     };
 
     private const string MinimalSpecialistSynthesisJson =
@@ -84,7 +86,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -250,7 +253,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -293,7 +297,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext { UserInput = "overlap" });
 
@@ -324,7 +329,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext { UserInput = "long" });
 
@@ -375,7 +381,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -442,13 +449,15 @@ public sealed class AgentRuntimeTests
                 Model = "qwen-test",
                 MaxToolIterations = 3,
                 EnableWorkerPasses = true,
+                EnableMemoryWorkerBeforeFinalAnswer = true,
                 EnableMemoryWorkerAfterFinalAnswer = true,
                 EnableContextCompaction = false,
                 MultiAgent = MultiAgentStubQueue
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -492,7 +501,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             toolRuntime,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var memory = (AgentConversationMemory?)null;
         var conversation = new List<AgentConversationMessage>();
@@ -538,7 +548,8 @@ public sealed class AgentRuntimeTests
             },
             recording,
             new StubMultiToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -587,14 +598,15 @@ public sealed class AgentRuntimeTests
             new AgentOptions
             {
                 Model = "m",
-                ContextSlotTokens = 2600,
+                ContextSlotTokens = 20000,
                 ContextSafetyMarginTokens = 200,
                 ReasoningReserveTokens = 200,
                 ContextBudgetCharsPerToken = 4,
+                MinAssistantCompletionTokens = 96,
                 EnableTokenBudgetCompaction = true,
                 EnableContextCompaction = true,
                 CompactionKeepRecentMessages = 4,
-                MaxConversationMessages = 200,
+                MaxConversationMessages = 8,
                 EnableWorkerPasses = false,
                 EnableDynamicToolScoping = false,
                 EnableToolPlannerPass = false,
@@ -602,7 +614,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubAgentToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -646,7 +659,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubAgentToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -679,7 +693,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubAgentToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext { UserInput = "merge" });
 
@@ -733,6 +748,7 @@ public sealed class AgentRuntimeTests
                 CompactionKeepRecentMessages = 6,
                 EnableContextCompaction = true,
                 EnableWorkerPasses = true,
+                EnableMemoryWorkerBeforeFinalAnswer = true,
                 EnableMemoryWorkerAfterFinalAnswer = true,
                 EnableDynamicToolScoping = false,
                 EnableToolPlannerPass = false,
@@ -741,7 +757,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubAgentToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -995,7 +1012,8 @@ public sealed class AgentRuntimeTests
             },
             recording,
             new StubMultiToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -1050,7 +1068,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubMultiToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext { UserInput = "teste" });
 
@@ -1099,7 +1118,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubMultiToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext { UserInput = "pergunta" });
 
@@ -1129,7 +1149,8 @@ public sealed class AgentRuntimeTests
             },
             recording,
             new StubMultiToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         await orchestrator.RunAsync(new AgentExecutionContext
         {
@@ -1182,7 +1203,8 @@ public sealed class AgentRuntimeTests
             },
             chatClient,
             new StubMultiToolRuntime(),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            NullChatSessionLogger.Instance);
 
         var result = await orchestrator.RunAsync(new AgentExecutionContext
         {

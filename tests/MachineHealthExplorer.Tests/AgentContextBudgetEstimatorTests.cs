@@ -25,8 +25,7 @@ public sealed class AgentContextBudgetEstimatorTests
             reasoningPressureSteps: 0,
             lastUsage: null);
 
-        Assert.True(maxOut < options.MinAssistantCompletionTokens);
-        Assert.True(maxOut >= 1);
+        Assert.Equal(0, maxOut);
         Assert.True(maxOut <= options.MaxOutputTokens);
     }
 

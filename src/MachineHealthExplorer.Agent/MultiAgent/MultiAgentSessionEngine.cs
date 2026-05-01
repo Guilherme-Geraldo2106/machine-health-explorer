@@ -1,6 +1,8 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
 using MachineHealthExplorer.Agent.Services;
+using MachineHealthExplorer.Logging.Abstractions;
+using MachineHealthExplorer.Logging.Services;
 using Microsoft.Extensions.Logging;
 
 namespace MachineHealthExplorer.Agent.MultiAgent;
@@ -16,22 +18,25 @@ internal sealed class MultiAgentSessionEngine
     private readonly SpecialistToolAgentWorker _specialistWorker;
     private readonly IFinalResponseComposer _finalComposer;
     private readonly ILogger _logger;
+    private readonly IChatSessionLogger _chatSessionLogger;
     private string? _resolvedModel;
 
     public MultiAgentSessionEngine(
         AgentOptions options,
         IAgentChatClient chatClient,
         IAgentToolRuntime toolRuntime,
-        ILogger logger)
+        ILogger logger,
+        IChatSessionLogger? chatSessionLogger = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _toolRuntime = toolRuntime ?? throw new ArgumentNullException(nameof(toolRuntime));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _chatSessionLogger = chatSessionLogger ?? NullChatSessionLogger.Instance;
         _workerRunner = new AgentEphemeralWorkerRunner(_options, _chatClient);
-        _answerPipeline = new AgentAssistantAnswerPipeline(_options, _chatClient, _workerRunner, logger);
+        _answerPipeline = new AgentAssistantAnswerPipeline(_options, _chatClient, _workerRunner, logger, _chatSessionLogger);
         _coordinator = new CoordinatorAgent(_options, _chatClient, logger);
-        _specialistWorker = new SpecialistToolAgentWorker(_options, _toolRuntime, _chatClient, logger);
+        _specialistWorker = new SpecialistToolAgentWorker(_options, _toolRuntime, _chatClient, logger, _chatSessionLogger);
         _finalComposer = new FinalComposerAgent(_options, _chatClient, logger);
     }
 
@@ -181,15 +186,16 @@ internal sealed class MultiAgentSessionEngine
 
         if (executedTools.Count > 0 || specialistResults.Count > 0)
         {
-            // Consolidate memory from specialist tool evidence (structured worker).
-            memory = await _workerRunner.RefreshMemoryAsync(
-                    model,
-                    memory,
-                    context.UserInput,
-                    executedTools,
-                    conversation.ToArray(),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            memory = _options.EnableMemoryWorkerBeforeFinalAnswer
+                ? await _workerRunner.RefreshMemoryAsync(
+                        model,
+                        memory,
+                        context.UserInput,
+                        executedTools,
+                        conversation.ToArray(),
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : _workerRunner.ApplyHeuristicMemoryFromToolExecutions(context.UserInput, executedTools, memory);
         }
 
         var schemaColumnHints = SchemaColumnNamesFromToolExecutions.Extract(executedTools);
@@ -277,7 +283,8 @@ internal sealed class MultiAgentSessionEngine
                 filtered.GetTools(),
                 model,
                 specialistSystem,
-                ExpectsDatasetQueryEvidence: step.ExpectsDatasetQueryEvidence);
+                ExpectsDatasetQueryEvidence: step.ExpectsDatasetQueryEvidence,
+                RequiredEvidenceKinds: step.RequiredEvidenceKinds);
 
             return await _specialistWorker.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
         }
@@ -403,7 +410,7 @@ You are the Machine Health Explorer multi-agent coordinator (memory-only block).
             var softSlot = Math.Max(512, AgentContextBudgetEstimator.GetEffectiveHostContextTokens(_options) - _options.ContextSafetyMarginTokens);
 
             var messagePressure = _options.EnableContextCompaction && conversation.Count > _options.MaxConversationMessages;
-            var tokenPressure = _options.EnableTokenBudgetCompaction && estimated + maxOut > softSlot;
+            var tokenPressure = _options.EnableTokenBudgetCompaction && (maxOut == 0 || estimated + maxOut > softSlot);
 
             if (!messagePressure && !tokenPressure)
             {

@@ -1,5 +1,6 @@
 using MachineHealthExplorer.Agent.Abstractions;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.Serialization;
 using System.Text;
 using System.Text.Json;
 
@@ -95,6 +96,11 @@ Output plain text with short bullet lines. Do not invent dataset facts.
             headMessages,
             _options.WorkerMaxOutputTokens);
 
+        var summarizeMaxOut = Math.Max(
+            AgentContextBudgetEstimator.GetAssistantCompletionFloorTokens(_options),
+            _options.WorkerMaxOutputTokens);
+        summarizeMaxOut = Math.Min(summarizeMaxOut, _options.MaxOutputTokens);
+
         AgentModelResponse response;
         try
         {
@@ -112,7 +118,7 @@ Output plain text with short bullet lines. Do not invent dataset facts.
                 ],
                 Tools = Array.Empty<AgentToolDefinition>(),
                 Temperature = _options.WorkerTemperature,
-                MaxOutputTokens = _options.WorkerMaxOutputTokens,
+                MaxOutputTokens = summarizeMaxOut,
                 EnableTools = false
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -173,6 +179,11 @@ Rules:
 """;
 
         var compactMemoryJson = AgentPromptBudgetGuard.BuildCompactMemoryProjectionJson(next, _options);
+        var workerMaxOut = Math.Max(
+            AgentContextBudgetEstimator.GetAssistantCompletionFloorTokens(_options),
+            _options.WorkerMaxOutputTokens);
+        workerMaxOut = Math.Min(workerMaxOut, _options.MaxOutputTokens);
+
         var userPrompt = AgentPromptBudgetGuard.BuildBoundedMemoryWorkerUserContent(
             _options,
             systemPrompt,
@@ -180,7 +191,7 @@ Rules:
             recentTranscript,
             toolExecutions,
             compactMemoryJson,
-            _options.WorkerMaxOutputTokens);
+            workerMaxOut);
 
         AgentModelResponse response;
         try
@@ -199,8 +210,17 @@ Rules:
                 ],
                 Tools = Array.Empty<AgentToolDefinition>(),
                 Temperature = _options.WorkerTemperature,
-                MaxOutputTokens = _options.WorkerMaxOutputTokens,
-                EnableTools = false
+                MaxOutputTokens = workerMaxOut,
+                EnableTools = false,
+                ResponseFormat = _options.EnableStructuredJsonOutputs
+                    ? new AgentJsonSchemaResponseFormat
+                    {
+                        Type = "json_schema",
+                        Name = AgentStructuredOutputJsonSchemas.MemoryWorkerSchemaName,
+                        Strict = _options.UseStrictJsonSchemaInResponseFormat,
+                        SchemaJson = AgentStructuredOutputJsonSchemas.MemoryWorker.Trim()
+                    }
+                    : null
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentModelBackendException ex) when (ex.IsContextLengthExceeded)
@@ -209,6 +229,46 @@ Rules:
         }
 
         return MergeMemoryFromWorkerJson(next, AgentMemoryWorkerJsonNormalizer.PrepareMemoryWorkerJson(response.Content));
+    }
+
+    /// <summary>
+    /// Updates session memory from tool executions without an LLM memory worker (digests + generic tooling line in rolling summary).
+    /// </summary>
+    public AgentConversationMemory ApplyHeuristicMemoryFromToolExecutions(
+        string latestUserInput,
+        IReadOnlyList<AgentToolExecutionRecord> toolExecutions,
+        AgentConversationMemory memory)
+    {
+        var language = LanguageHeuristics.DetectLanguage(latestUserInput, memory.LanguagePreference);
+        var next = memory with
+        {
+            CurrentUserIntent = string.IsNullOrWhiteSpace(latestUserInput) ? memory.CurrentUserIntent : latestUserInput.Trim(),
+            LanguagePreference = string.IsNullOrWhiteSpace(language) ? memory.LanguagePreference : language,
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+
+        next = next.WithToolEvidence(
+            toolExecutions.Select(execution => new AgentToolEvidenceDigest
+            {
+                ToolName = execution.ToolName,
+                Digest = BuildToolDigest(execution.ToolName, execution.ResultJson, _options.MemoryEvidenceDigestMaxChars)
+            }),
+            _options.MemoryEvidenceDigestMaxChars,
+            _options.MemoryToolEvidenceMaxDigests);
+
+        if (toolExecutions.Count > 0)
+        {
+            var names = string.Join(
+                ", ",
+                toolExecutions.Select(e => e.ToolName).Distinct(StringComparer.OrdinalIgnoreCase).Take(12));
+            var line = $"[tooling] Tools touched this round: {names}.";
+            var mergedRolling = string.IsNullOrWhiteSpace(next.RollingSummary)
+                ? line
+                : $"{next.RollingSummary}\n{line}";
+            next = next.WithRollingSummary(mergedRolling.Trim(), _options.MemorySummaryMaxLength);
+        }
+
+        return next;
     }
 
     public async Task<string> RunEpilogueAsync(
@@ -233,6 +293,11 @@ Partial answer:
 {AgentPromptBudgetGuard.CompactPlain(partialAnswer, 12000)}
 """;
 
+        var epilogueMax = Math.Max(
+            AgentContextBudgetEstimator.GetAssistantCompletionFloorTokens(_options),
+            Math.Clamp(_options.WorkerMaxOutputTokens, 128, 1200));
+        epilogueMax = Math.Min(epilogueMax, _options.MaxOutputTokens);
+
         var response = await _chatClient.CompleteAsync(new AgentModelRequest
         {
             Model = model,
@@ -247,7 +312,7 @@ Partial answer:
             ],
             Tools = Array.Empty<AgentToolDefinition>(),
             Temperature = Math.Min(0.4, _options.WorkerTemperature + 0.1),
-            MaxOutputTokens = Math.Clamp(_options.WorkerMaxOutputTokens, 128, 1200),
+            MaxOutputTokens = epilogueMax,
             EnableTools = false
         }, cancellationToken).ConfigureAwait(false);
 
@@ -295,9 +360,8 @@ Write the final answer now.
         });
 
         var workerCap = Math.Clamp(_options.WorkerMaxOutputTokens, 128, 1600);
-        var maxOut = Math.Max(
-            Math.Clamp(_options.MinAssistantCompletionTokens, 96, _options.MaxOutputTokens),
-            workerCap);
+        var floor = AgentContextBudgetEstimator.GetAssistantCompletionFloorTokens(_options);
+        var maxOut = Math.Max(floor, workerCap);
         maxOut = Math.Min(maxOut, _options.MaxOutputTokens);
         var fitted = AgentPromptBudgetGuard.FitConversationTail(
             _options,
@@ -305,6 +369,17 @@ Write the final answer now.
             transcript,
             maxOut,
             keepTail: 4);
+
+        var estimated = AgentContextBudgetEstimator.EstimatePromptTokens(_options, systemPrompt, fitted, Array.Empty<AgentToolDefinition>());
+        var resolved = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(_options, estimated, reasoningPressureSteps: 0, lastUsage: null);
+        if (resolved <= 0)
+        {
+            resolved = Math.Min(maxOut, Math.Max(floor, 256));
+        }
+        else
+        {
+            resolved = Math.Min(resolved, maxOut);
+        }
 
         try
         {
@@ -315,13 +390,24 @@ Write the final answer now.
                 Messages = fitted,
                 Tools = Array.Empty<AgentToolDefinition>(),
                 Temperature = Math.Min(0.35, _options.WorkerTemperature + 0.05),
-                MaxOutputTokens = maxOut,
+                MaxOutputTokens = resolved,
                 EnableTools = false
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentModelBackendException ex) when (ex.IsContextLengthExceeded && fitted.Count > 2)
         {
-            var trimmed = AgentPromptBudgetGuard.FitConversationTail(_options, systemPrompt, fitted, maxOut, keepTail: 2);
+            var trimmed = AgentPromptBudgetGuard.FitConversationTail(_options, systemPrompt, fitted, resolved, keepTail: 2);
+            var est2 = AgentContextBudgetEstimator.EstimatePromptTokens(_options, systemPrompt, trimmed, Array.Empty<AgentToolDefinition>());
+            var resolved2 = AgentContextBudgetEstimator.ComputeEffectiveMaxOutputTokens(_options, est2, reasoningPressureSteps: 0, lastUsage: null);
+            if (resolved2 <= 0)
+            {
+                resolved2 = Math.Min(resolved, Math.Max(floor, 256));
+            }
+            else
+            {
+                resolved2 = Math.Min(resolved2, resolved);
+            }
+
             return await _chatClient.CompleteAsync(new AgentModelRequest
             {
                 Model = model,
@@ -329,7 +415,7 @@ Write the final answer now.
                 Messages = trimmed,
                 Tools = Array.Empty<AgentToolDefinition>(),
                 Temperature = Math.Min(0.35, _options.WorkerTemperature + 0.05),
-                MaxOutputTokens = maxOut,
+                MaxOutputTokens = resolved2,
                 EnableTools = false
             }, cancellationToken).ConfigureAwait(false);
         }
