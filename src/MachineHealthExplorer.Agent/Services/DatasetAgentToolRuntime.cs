@@ -193,6 +193,65 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
             additionalProperties = false
         };
 
+        var derivedMetricSchema = new
+        {
+            type = "object",
+            properties = new
+            {
+                alias = new
+                {
+                    type = "string",
+                    description = "Unique output column name for the computed metric (may appear in sortRules/having)."
+                },
+                expression = new
+                {
+                    type = "string",
+                    description =
+                        "Arithmetic over identifiers only: aggregation aliases, numeric groupByColumns, and numeric bin aliases (manual groupByBins or numeric keys from groupByAutoBins). " +
+                        "Operators: + - * / parentheses; numeric literals. Division by zero yields null for that cell. " +
+                        "This field is not free-form code; unknown tokens are rejected. Derived values are numeric only and are computed from values already present in the grouped row (aggregations plus grouping keys)."
+                }
+            },
+            required = new[] { "alias", "expression" },
+            additionalProperties = false
+        };
+
+        var groupByAutoBinSchema = new
+        {
+            type = "object",
+            properties = new
+            {
+                columnName = new
+                {
+                    type = "string",
+                    description = "Exact numeric column name from the dataset schema."
+                },
+                alias = new
+                {
+                    type = "string",
+                    description = "Output grouping column name (numeric bin lower bound in the filtered scope)."
+                },
+                method = new
+                {
+                    type = "string",
+                    @enum = new[] { "EqualWidth", "Quantile" },
+                    description =
+                        "EqualWidth: min/max on filtered rows, split into binCount equal-width intervals; key is each interval's lower bound. " +
+                        "Quantile: approximate equal-frequency bins on filtered rows; key is the lower bound of the quantile slice (numeric, not a semantic label). " +
+                        "Neither method marks any bin as important; interpretation is model-side."
+                },
+                binCount = new
+                {
+                    type = "integer",
+                    minimum = 2,
+                    maximum = 100,
+                    description = "Optional; defaults to 10 when omitted."
+                }
+            },
+            required = new[] { "columnName", "alias", "method" },
+            additionalProperties = false
+        };
+
         return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["get_schema"] = EmptyObjectSchema,
@@ -265,7 +324,8 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                 type = "object",
                 description =
                     "Tabular group-by with aggregations. Count without a per-aggregation filter counts all rows in each group; add a per-aggregation filter on Count to count only rows matching that predicate (e.g. row_count vs event_count in one call). " +
-                    "groupByBins only assigns numeric bucket labels; it does not mark any bucket as critical.",
+                    "groupByBins and groupByAutoBins only assign neutral numeric bucket keys; they do not mark any bucket as critical. " +
+                    "derivedMetrics computes numeric ratios or combinations from aggregation outputs and numeric grouping keys only (never arbitrary code).",
                 properties = new
                 {
                     groupByColumns = stringArraySchema,
@@ -302,6 +362,14 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                             additionalProperties = false
                         }
                     },
+                    groupByAutoBins = new
+                    {
+                        type = "array",
+                        description =
+                            "Optional automatic binning on filtered rows. Keys are numeric lower bounds suitable for sort/having; semantics are neutral (no critical thresholds). " +
+                            "Can be combined with groupByColumns and groupByBins when aliases do not collide.",
+                        items = groupByAutoBinSchema
+                    },
                     aggregations = new
                     {
                         type = "array",
@@ -309,11 +377,20 @@ public sealed class DatasetAgentToolRuntime : IAgentToolRuntime
                             "One object per output metric. Each aggregation may carry its own filter so different metrics can share the same group keys (e.g. unfiltered Count plus filtered Count).",
                         items = aggregationSchema
                     },
+                    derivedMetrics = new
+                    {
+                        type = "array",
+                        description =
+                            "Optional post-aggregation numeric metrics (e.g. ratios). Evaluated in order; later items may reference earlier derived aliases. " +
+                            "Expressions are restricted arithmetic; identifiers must match aggregation aliases or numeric grouping dimensions.",
+                        items = derivedMetricSchema
+                    },
                     filter = filterSchema,
                     having = filterSchema,
                     sortRules = new
                     {
                         type = "array",
+                        description = "May reference grouping columns, bin aliases, aggregation aliases, or derived metric aliases.",
                         items = sortRuleSchema
                     },
                     page = new

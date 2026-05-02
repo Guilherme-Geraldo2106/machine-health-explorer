@@ -251,11 +251,16 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             ? request.GroupByBins.ToArray()
             : Array.Empty<NumericGroupBinSpec>();
 
+        var autoBinSpecs = request.GroupByAutoBins?.Count > 0
+            ? request.GroupByAutoBins.ToArray()
+            : Array.Empty<NumericGroupAutoBinSpec>();
+
         var groupByColumns = request.GroupByColumns.Count == 0
             ? Array.Empty<string>()
             : request.GroupByColumns.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
-        ValidateGroupByBins(binSpecs, groupByColumns, schemaLookup);
+        ValidateGroupByBins(binSpecs, groupByColumns, schemaLookup, autoBinSpecs);
+        ValidateGroupByAutoBins(autoBinSpecs, groupByColumns, binSpecs, schemaLookup);
 
         ValidateColumns(groupByColumns, schemaLookup);
         ValidateFilter(request.Filter, schemaLookup);
@@ -264,21 +269,49 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             ? [DatasetAggregations.Count("row_count")]
             : request.Aggregations.ToArray();
 
-        var groupDimensionNames = groupByColumns.Concat(binSpecs.Select(spec => spec.Alias)).ToArray();
+        var derivedMetrics = request.DerivedMetrics?.Count > 0
+            ? request.DerivedMetrics.ToArray()
+            : Array.Empty<DerivedMetricDefinition>();
+
+        var groupDimensionNames = groupByColumns
+            .Concat(binSpecs.Select(spec => spec.Alias))
+            .Concat(autoBinSpecs.Select(spec => spec.Alias))
+            .ToArray();
+
         ValidateAggregations(aggregations, groupDimensionNames, schemaLookup);
+        ValidateDerivedMetricDefinitions(derivedMetrics, groupByColumns, binSpecs, autoBinSpecs, aggregations, schemaLookup);
 
         var filteredRows = FilterRows(snapshot.Rows, request.Filter, schemaLookup);
 
-        var groupedRows = binSpecs.Length == 0
+        var autoBinMaps = BuildAutoBinRowMaps(filteredRows, autoBinSpecs);
+        var autoBinSummaries = BuildAutoBinAppliedSummaries(autoBinSpecs, autoBinMaps);
+
+        var groupedRows = binSpecs.Length == 0 && autoBinSpecs.Length == 0
             ? BuildGroups(filteredRows, groupByColumns)
-                .Select(group => BuildGroupAggregationRow(group.KeyValues, group.Rows, groupDimensionNames, aggregations, schemaLookup))
+                .Select(group => BuildGroupAggregationRowWithDerived(
+                    group.KeyValues,
+                    group.Rows,
+                    groupDimensionNames,
+                    aggregations,
+                    derivedMetrics,
+                    schemaLookup))
                 .ToArray()
-            : BuildGroupsWithBins(filteredRows, groupByColumns, binSpecs)
-                .Select(group => BuildGroupAggregationRow(group.KeyValues, group.Rows, groupDimensionNames, aggregations, schemaLookup))
+            : BuildGroupsWithBinDimensions(filteredRows, groupByColumns, binSpecs, autoBinSpecs, autoBinMaps)
+                .Select(group => BuildGroupAggregationRowWithDerived(
+                    group.KeyValues,
+                    group.Rows,
+                    groupDimensionNames,
+                    aggregations,
+                    derivedMetrics,
+                    schemaLookup))
                 .ToArray();
 
-        var aggregatedColumns = groupDimensionNames.Concat(aggregations.Select(aggregation => aggregation.Alias)).ToArray();
-        var aggregateSchema = BuildAggregateSchema(groupByColumns, binSpecs, aggregations, schemaLookup);
+        var aggregatedColumns = groupDimensionNames
+            .Concat(aggregations.Select(a => a.Alias))
+            .Concat(derivedMetrics.Select(d => d.Alias))
+            .ToArray();
+
+        var aggregateSchema = BuildAggregateSchema(groupByColumns, binSpecs, autoBinSpecs, aggregations, derivedMetrics, schemaLookup);
 
         ValidateFilter(request.Having, aggregateSchema);
         ValidateColumns(request.SortRules.Select(rule => rule.ColumnName), aggregateSchema);
@@ -300,7 +333,8 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             ScopedRowCount = filteredRows.Length,
             TotalGroups = scopedGroups.Length,
             Page = request.Page,
-            PageSize = request.PageSize
+            PageSize = request.PageSize,
+            GroupByAutoBinsApplied = autoBinSummaries
         };
     }
 
@@ -521,8 +555,12 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
     private static void ValidateGroupByBins(
         IReadOnlyList<NumericGroupBinSpec> bins,
         IReadOnlyList<string> groupByColumns,
-        IReadOnlyDictionary<string, ColumnSchema> schemaLookup)
+        IReadOnlyDictionary<string, ColumnSchema> schemaLookup,
+        IReadOnlyList<NumericGroupAutoBinSpec> autoBinSpecs)
     {
+        var autoAliases = new HashSet<string>(
+            autoBinSpecs.Select(spec => spec.Alias.Trim()).Where(a => a.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
         var groupNameSet = new HashSet<string>(groupByColumns, StringComparer.OrdinalIgnoreCase);
         foreach (var bin in bins)
         {
@@ -534,6 +572,11 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             if (string.IsNullOrWhiteSpace(bin.Alias))
             {
                 throw new ArgumentException("Each groupByBins item must include a non-empty alias.");
+            }
+
+            if (autoAliases.Contains(bin.Alias.Trim()))
+            {
+                throw new ArgumentException($"groupByBins alias '{bin.Alias}' collides with a groupByAutoBins alias.");
             }
 
             if (groupNameSet.Contains(bin.Alias.Trim()))
@@ -566,15 +609,201 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
         }
     }
 
-    private static IReadOnlyList<(IReadOnlyList<object?> KeyValues, DatasetRow[] Rows)> BuildGroupsWithBins(
+    private static void ValidateGroupByAutoBins(
+        IReadOnlyList<NumericGroupAutoBinSpec> autoBins,
+        IReadOnlyList<string> groupByColumns,
+        IReadOnlyList<NumericGroupBinSpec> manualBins,
+        IReadOnlyDictionary<string, ColumnSchema> schemaLookup)
+    {
+        var reserved = new HashSet<string>(groupByColumns, StringComparer.OrdinalIgnoreCase);
+        foreach (var manual in manualBins)
+        {
+            reserved.Add(manual.Alias.Trim());
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var spec in autoBins)
+        {
+            if (string.IsNullOrWhiteSpace(spec.ColumnName))
+            {
+                throw new ArgumentException("Each groupByAutoBins item must include a non-empty columnName.");
+            }
+
+            if (string.IsNullOrWhiteSpace(spec.Alias))
+            {
+                throw new ArgumentException("Each groupByAutoBins item must include a non-empty alias.");
+            }
+
+            var alias = spec.Alias.Trim();
+            if (reserved.Contains(alias))
+            {
+                throw new ArgumentException($"groupByAutoBins alias '{spec.Alias}' collides with a groupByColumns name or groupByBins alias.");
+            }
+
+            if (!seen.Add(alias))
+            {
+                throw new ArgumentException($"Duplicate groupByAutoBins alias '{spec.Alias}'.");
+            }
+
+            var binCount = GroupByAutoBinAssignments.ResolveBinCount(spec.BinCount);
+            GroupByAutoBinAssignments.ValidateBinCount(binCount);
+
+            var column = GetRequiredColumn(spec.ColumnName.Trim(), schemaLookup);
+            if (!column.IsNumeric)
+            {
+                throw new ArgumentException($"groupByAutoBins column '{column.Name}' must be numeric.");
+            }
+        }
+    }
+
+    private static void ValidateDerivedMetricDefinitions(
+        IReadOnlyList<DerivedMetricDefinition> derivedMetrics,
+        IReadOnlyList<string> groupByColumns,
+        IReadOnlyList<NumericGroupBinSpec> manualBins,
+        IReadOnlyList<NumericGroupAutoBinSpec> autoBins,
+        IReadOnlyList<AggregationDefinition> aggregations,
+        IReadOnlyDictionary<string, ColumnSchema> schemaLookup)
+    {
+        var reservedNames = new HashSet<string>(
+            groupByColumns
+                .Concat(manualBins.Select(b => b.Alias))
+                .Concat(autoBins.Select(b => b.Alias)),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var agg in aggregations)
+        {
+            reservedNames.Add(agg.Alias);
+        }
+
+        var allowedForExpression = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var columnName in groupByColumns)
+        {
+            if (schemaLookup.TryGetValue(columnName, out var column) && column.IsNumeric)
+            {
+                allowedForExpression.Add(columnName);
+            }
+        }
+
+        foreach (var bin in manualBins)
+        {
+            allowedForExpression.Add(bin.Alias);
+        }
+
+        foreach (var bin in autoBins)
+        {
+            allowedForExpression.Add(bin.Alias);
+        }
+
+        foreach (var agg in aggregations)
+        {
+            allowedForExpression.Add(agg.Alias);
+        }
+
+        var derivedSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var derived in derivedMetrics)
+        {
+            if (string.IsNullOrWhiteSpace(derived.Alias))
+            {
+                throw new ArgumentException("Each derivedMetrics item must include a non-empty alias.");
+            }
+
+            var alias = derived.Alias.Trim();
+            if (reservedNames.Contains(alias))
+            {
+                throw new ArgumentException(
+                    $"Derived metric alias '{derived.Alias}' collides with a grouping dimension, bin alias, or aggregation alias.");
+            }
+
+            if (!derivedSeen.Add(alias))
+            {
+                throw new ArgumentException($"Duplicate derived metric alias '{derived.Alias}'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(derived.Expression))
+            {
+                throw new ArgumentException($"Derived metric '{derived.Alias}' must include a non-empty expression.");
+            }
+
+            DerivedMetricExpressionEvaluator.Validate(derived.Expression, allowedForExpression);
+            allowedForExpression.Add(alias);
+        }
+    }
+
+    private static IReadOnlyList<Dictionary<DatasetRow, double>> BuildAutoBinRowMaps(
+        IReadOnlyList<DatasetRow> filteredRows,
+        IReadOnlyList<NumericGroupAutoBinSpec> autoBinSpecs)
+    {
+        if (autoBinSpecs.Count == 0)
+        {
+            return Array.Empty<Dictionary<DatasetRow, double>>();
+        }
+
+        var maps = new List<Dictionary<DatasetRow, double>>();
+        foreach (var spec in autoBinSpecs)
+        {
+            var binCount = GroupByAutoBinAssignments.ResolveBinCount(spec.BinCount);
+            GroupByAutoBinAssignments.ValidateBinCount(binCount);
+            var column = spec.ColumnName.Trim();
+            var map = spec.Method switch
+            {
+                GroupByAutoBinMethod.EqualWidth => GroupByAutoBinAssignments.BuildEqualWidthRowToLowerBound(
+                    filteredRows,
+                    column,
+                    binCount),
+                GroupByAutoBinMethod.Quantile => GroupByAutoBinAssignments.BuildQuantileRowToLowerBound(
+                    filteredRows,
+                    column,
+                    binCount),
+                _ => throw new ArgumentException($"Unsupported groupByAutoBins method '{spec.Method}'.")
+            };
+            maps.Add(map);
+        }
+
+        return maps;
+    }
+
+    private static IReadOnlyList<GroupByAutoBinAppliedSummary> BuildAutoBinAppliedSummaries(
+        IReadOnlyList<NumericGroupAutoBinSpec> specs,
+        IReadOnlyList<Dictionary<DatasetRow, double>> maps)
+    {
+        if (specs.Count == 0)
+        {
+            return Array.Empty<GroupByAutoBinAppliedSummary>();
+        }
+
+        var list = new List<GroupByAutoBinAppliedSummary>();
+        for (var i = 0; i < specs.Count; i++)
+        {
+            var spec = specs[i];
+            var map = maps[i];
+            var values = map.Values.ToArray();
+            var distinct = values.Distinct().Count();
+            var binCount = GroupByAutoBinAssignments.ResolveBinCount(spec.BinCount);
+            list.Add(new GroupByAutoBinAppliedSummary
+            {
+                Alias = spec.Alias.Trim(),
+                Method = spec.Method.ToString(),
+                BinCount = binCount,
+                ScopedMin = values.Length == 0 ? null : values.Min(),
+                ScopedMax = values.Length == 0 ? null : values.Max(),
+                DistinctBinKeysObserved = distinct
+            });
+        }
+
+        return list;
+    }
+
+    private static IReadOnlyList<(IReadOnlyList<object?> KeyValues, DatasetRow[] Rows)> BuildGroupsWithBinDimensions(
         IReadOnlyList<DatasetRow> rows,
         IReadOnlyList<string> groupByColumns,
-        IReadOnlyList<NumericGroupBinSpec> binSpecs)
+        IReadOnlyList<NumericGroupBinSpec> manualBinSpecs,
+        IReadOnlyList<NumericGroupAutoBinSpec> autoBinSpecs,
+        IReadOnlyList<Dictionary<DatasetRow, double>> autoBinMaps)
     {
         var projected = new List<(GroupKey Key, DatasetRow Row)>();
         foreach (var row in rows)
         {
-            if (!TryBuildBinnedGroupKey(row, groupByColumns, binSpecs, out var keyValues))
+            if (!TryBuildFullGroupKey(row, groupByColumns, manualBinSpecs, autoBinMaps, out var keyValues))
             {
                 continue;
             }
@@ -593,21 +822,22 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             .ToArray();
     }
 
-    private static bool TryBuildBinnedGroupKey(
+    private static bool TryBuildFullGroupKey(
         DatasetRow row,
         IReadOnlyList<string> groupByColumns,
-        IReadOnlyList<NumericGroupBinSpec> binSpecs,
+        IReadOnlyList<NumericGroupBinSpec> manualBinSpecs,
+        IReadOnlyList<Dictionary<DatasetRow, double>> autoBinMaps,
         out object?[] keyValues)
     {
-        keyValues = new object?[groupByColumns.Count + binSpecs.Count];
+        keyValues = new object?[groupByColumns.Count + manualBinSpecs.Count + autoBinMaps.Count];
         for (var i = 0; i < groupByColumns.Count; i++)
         {
             keyValues[i] = GetValue(row, groupByColumns[i]);
         }
 
-        for (var b = 0; b < binSpecs.Count; b++)
+        for (var b = 0; b < manualBinSpecs.Count; b++)
         {
-            var spec = binSpecs[b];
+            var spec = manualBinSpecs[b];
             if (!TryGetNumericMeasurement(GetValue(row, spec.ColumnName), out var measurement))
             {
                 return false;
@@ -616,6 +846,16 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             var width = spec.BinWidth;
             var lower = Math.Floor(measurement / width) * width;
             keyValues[groupByColumns.Count + b] = lower;
+        }
+
+        for (var a = 0; a < autoBinMaps.Count; a++)
+        {
+            if (!autoBinMaps[a].TryGetValue(row, out var bound))
+            {
+                return false;
+            }
+
+            keyValues[groupByColumns.Count + manualBinSpecs.Count + a] = bound;
         }
 
         return true;
@@ -780,11 +1020,12 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             .ToArray();
     }
 
-    private static GroupAggregationRow BuildGroupAggregationRow(
+    private static GroupAggregationRow BuildGroupAggregationRowWithDerived(
         IReadOnlyList<object?> keyValues,
         IReadOnlyList<DatasetRow> rows,
         IReadOnlyList<string> groupByColumns,
         IReadOnlyList<AggregationDefinition> aggregations,
+        IReadOnlyList<DerivedMetricDefinition> derivedMetrics,
         IReadOnlyDictionary<string, ColumnSchema> sourceSchema)
     {
         var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -798,6 +1039,12 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             values[aggregation.Alias] = EvaluateAggregation(rows, aggregation, sourceSchema);
         }
 
+        foreach (var derived in derivedMetrics)
+        {
+            var evaluated = DerivedMetricExpressionEvaluator.Evaluate(derived.Expression, values);
+            values[derived.Alias.Trim()] = evaluated.HasValue ? evaluated.Value : null;
+        }
+
         return new GroupAggregationRow
         {
             Values = new ReadOnlyDictionary<string, object?>(values)
@@ -806,8 +1053,10 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
 
     private static IReadOnlyDictionary<string, ColumnSchema> BuildAggregateSchema(
         IReadOnlyList<string> groupByColumns,
-        IReadOnlyList<NumericGroupBinSpec> binSpecs,
+        IReadOnlyList<NumericGroupBinSpec> manualBinSpecs,
+        IReadOnlyList<NumericGroupAutoBinSpec> autoBinSpecs,
         IReadOnlyList<AggregationDefinition> aggregations,
+        IReadOnlyList<DerivedMetricDefinition> derivedMetrics,
         IReadOnlyDictionary<string, ColumnSchema> sourceSchema)
     {
         var result = new Dictionary<string, ColumnSchema>(StringComparer.OrdinalIgnoreCase);
@@ -816,15 +1065,32 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
             result[groupByColumn] = sourceSchema[groupByColumn];
         }
 
-        foreach (var bin in binSpecs)
+        foreach (var bin in manualBinSpecs)
         {
             var source = sourceSchema[bin.ColumnName];
             result[bin.Alias] = source with { Name = bin.Alias };
         }
 
+        foreach (var auto in autoBinSpecs)
+        {
+            var source = sourceSchema[auto.ColumnName.Trim()];
+            result[auto.Alias.Trim()] = source with { Name = auto.Alias.Trim() };
+        }
+
         foreach (var aggregation in aggregations)
         {
             result[aggregation.Alias] = BuildAggregationColumnSchema(aggregation, sourceSchema);
+        }
+
+        foreach (var derived in derivedMetrics)
+        {
+            result[derived.Alias.Trim()] = new ColumnSchema
+            {
+                Name = derived.Alias.Trim(),
+                DataType = DataTypeKind.Decimal,
+                IsNumeric = true,
+                IsNullable = true
+            };
         }
 
         return result;

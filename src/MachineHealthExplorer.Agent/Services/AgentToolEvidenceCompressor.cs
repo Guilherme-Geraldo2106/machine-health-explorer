@@ -77,22 +77,42 @@ internal static class AgentToolEvidenceCompressor
         }
 
         var aggregationSummary = TrySummarizeGroupAndAggregateAggregationSemantics(toolName, toolRequestArgumentsJson);
-        object envelope = aggregationSummary.Count > 0
+        var derivedSummary = TrySummarizeGroupAndAggregateDerivedMetrics(toolName, toolRequestArgumentsJson);
+        object envelope = aggregationSummary.Count == 0 && derivedSummary.Count == 0
             ? new
             {
                 schema = "mhe_tool_evidence_v1",
                 tool = toolName,
                 preview = body,
-                original_length = normalized.Length,
-                aggregationRequestSummary = aggregationSummary
-            }
-            : new
-            {
-                schema = "mhe_tool_evidence_v1",
-                tool = toolName,
-                preview = body,
                 original_length = normalized.Length
-            };
+            }
+            : aggregationSummary.Count > 0 && derivedSummary.Count > 0
+                ? new
+                {
+                    schema = "mhe_tool_evidence_v1",
+                    tool = toolName,
+                    preview = body,
+                    original_length = normalized.Length,
+                    aggregationRequestSummary = aggregationSummary,
+                    derivedMetricsSummary = derivedSummary
+                }
+                : aggregationSummary.Count > 0
+                    ? new
+                    {
+                        schema = "mhe_tool_evidence_v1",
+                        tool = toolName,
+                        preview = body,
+                        original_length = normalized.Length,
+                        aggregationRequestSummary = aggregationSummary
+                    }
+                    : new
+                    {
+                        schema = "mhe_tool_evidence_v1",
+                        tool = toolName,
+                        preview = body,
+                        original_length = normalized.Length,
+                        derivedMetricsSummary = derivedSummary
+                    };
 
         return JsonSerializer.Serialize(envelope, AgentJsonSerializer.Options);
     }
@@ -155,6 +175,59 @@ internal static class AgentToolEvidenceCompressor
         string Alias,
         string Function,
         bool PerAggregationFilterPresent);
+
+    /// <summary>
+    /// Optional derived metric aliases/expressions from the tool request (not evaluated values).
+    /// </summary>
+    private static IReadOnlyList<DerivedMetricRequestSummaryEntry> TrySummarizeGroupAndAggregateDerivedMetrics(
+        string toolName,
+        string? toolRequestArgumentsJson)
+    {
+        if (!string.Equals(toolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(toolRequestArgumentsJson))
+        {
+            return Array.Empty<DerivedMetricRequestSummaryEntry>();
+        }
+
+        try
+        {
+            var node = JsonNode.Parse(toolRequestArgumentsJson);
+            if (node is not JsonObject root)
+            {
+                return Array.Empty<DerivedMetricRequestSummaryEntry>();
+            }
+
+            var derived = root["derivedMetrics"]?.AsArray();
+            if (derived is null || derived.Count == 0)
+            {
+                return Array.Empty<DerivedMetricRequestSummaryEntry>();
+            }
+
+            var list = new List<DerivedMetricRequestSummaryEntry>();
+            foreach (var item in derived)
+            {
+                if (item is not JsonObject row)
+                {
+                    continue;
+                }
+
+                var alias = row["alias"]?.GetValue<string>() ?? string.Empty;
+                var expression = row["expression"]?.GetValue<string>() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(alias) || !string.IsNullOrWhiteSpace(expression))
+                {
+                    list.Add(new DerivedMetricRequestSummaryEntry(alias, expression));
+                }
+            }
+
+            return list;
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<DerivedMetricRequestSummaryEntry>();
+        }
+    }
+
+    private sealed record DerivedMetricRequestSummaryEntry(string Alias, string Expression);
 
     public static bool CompactToolMessagesInConversation(List<AgentConversationMessage> messages, int newPreviewMaxChars)
     {

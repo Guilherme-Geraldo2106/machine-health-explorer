@@ -500,7 +500,8 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             var scopedSurfaceNames = new HashSet<string>(
                 scopedTools.Select(t => t.Name),
                 StringComparer.OrdinalIgnoreCase);
-            var scopedCalls = response.ToolCalls
+            var allToolCalls = response.ToolCalls.ToArray();
+            var scopedCalls = allToolCalls
                 .Where(c => scopedSurfaceNames.Contains(c.Name))
                 .ToArray();
 
@@ -545,10 +546,10 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 {
                     Role = AgentConversationRole.Assistant,
                     Content = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content),
-                    ToolCalls = response.ToolCalls
+                    ToolCalls = allToolCalls
                 });
 
-                foreach (var call in response.ToolCalls)
+                foreach (var call in allToolCalls)
                 {
                     var errorJson = SpecialistToolSurfaceValidation.BuildToolNotOnSpecialistAllowlistResultJson(
                         call.Name,
@@ -586,14 +587,45 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 {
                     Role = AgentConversationRole.Assistant,
                     Content = AgentVisibleResponseNormalizer.StripInternalAssistantSurface(response.Content),
-                    ToolCalls = scopedCalls
+                    ToolCalls = allToolCalls
                 });
 
-                foreach (var toolCall in scopedCalls)
+                foreach (var toolCall in allToolCalls)
                 {
                     var sw = Stopwatch.StartNew();
                     AgentToolExecutionRecord execution;
-                    if (!exposedSurfaceNames.Contains(toolCall.Name))
+                    if (!scopedSurfaceNames.Contains(toolCall.Name))
+                    {
+                        var rejectionPayload = SpecialistToolSurfaceValidation.BuildToolNotOnSpecialistAllowlistResultJson(
+                            toolCall.Name,
+                            allowedNames,
+                            toolsExposedForModelTurn,
+                            scopedTools,
+                            request.UseFullToolSchemas);
+                        _chatSessionLogger.Append(new ChatSessionLogEvent(
+                            default,
+                            string.Empty,
+                            "agent.tool_call.rejected_allowlist",
+                            "internal",
+                            model,
+                            response.FinishReason,
+                            SummarizeToolCallsForLog(new[] { toolCall }),
+                            null,
+                            null,
+                            null,
+                            rejectionPayload,
+                            null,
+                            null));
+
+                        execution = new AgentToolExecutionRecord
+                        {
+                            ToolName = toolCall.Name,
+                            ArgumentsJson = toolCall.ArgumentsJson ?? "{}",
+                            IsError = true,
+                            ResultJson = rejectionPayload
+                        };
+                    }
+                    else if (!exposedSurfaceNames.Contains(toolCall.Name))
                     {
                         _logger.LogWarning(
                             "Specialist {Specialist} iteration={Iteration} tool_call_rejected_not_on_exposed_surface requested={Tool} exposed=[{Exposed}]",
@@ -748,8 +780,9 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 return new AgentTaskResult(
                     kind,
                     Success: executedTools.Count > 0,
-                    FailureMessage:
-                    "Rodada com tools truncada (finish_reason=length) sem tool_calls após recuperação direta; orçamento ou modelo não emitiu JSON de tool a tempo.",
+                    FailureMessage: executedTools.Count > 0
+                        ? null
+                        : "Rodada com tools truncada (finish_reason=length) sem tool_calls após recuperação direta; orçamento ou modelo não emitiu JSON de tool a tempo.",
                     executedTools,
                     truncatedOutput,
                     conversation.ToArray());

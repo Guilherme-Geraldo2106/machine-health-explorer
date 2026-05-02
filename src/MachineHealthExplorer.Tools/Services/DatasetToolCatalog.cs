@@ -45,11 +45,11 @@ public sealed class DatasetToolCatalog : IDatasetToolCatalog
         {
             Name = "group_and_aggregate",
             Description =
-                "Groups rows by explicit columns and/or numeric histogram bins (bucket lower = floor(value/binWidth)*binWidth), then computes aggregations (count, sum, etc.). " +
+                "Groups rows by explicit columns and/or numeric histogram bins (bucket lower = floor(value/binWidth)*binWidth), optional automatic equal-width or quantile bins, then computes aggregations (count, sum, etc.) and optional derivedMetrics (restricted arithmetic on aggregation outputs and numeric grouping keys). " +
                 "Semantics: Count with no per-aggregation filter counts every row in the group (total group size). " +
                 "To count only a subset (events, flags, labels), use Count on the same grouping with a per-aggregation filter; pick the filter column from the schema. " +
-                "Common pattern: alias row_count = Count without filter; alias event_count = Count with a filter on a boolean/categorical column the model selects from the schema. " +
-                "groupByBins only builds numeric ranges; it does not interpret which range is important.",
+                "Common pattern: alias row_count = Count without filter; alias event_count = Count with a filter on a boolean/categorical column the model selects from the schema; use derivedMetrics for ratios such as event_count/row_count when both exist. " +
+                "groupByBins and groupByAutoBins only build neutral numeric ranges or quantile keys; they do not interpret which range is important.",
             InputHints = ["GroupAggregationRequest"],
             ExamplePrompts =
             [

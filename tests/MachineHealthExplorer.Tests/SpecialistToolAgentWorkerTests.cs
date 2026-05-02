@@ -108,6 +108,64 @@ public sealed class SpecialistToolAgentWorkerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_MixedAllowlistedAndInvalidToolCalls_ExecutesValidAndSurfacesRejections()
+    {
+        var options = new AgentOptions
+        {
+            Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = false,
+                SpecialistMaxToolIterations = 8,
+                SpecialistRecoveryPreferToolChoiceRequired = false
+            }
+        };
+
+        var runtime = new GenericTwoToolRuntime();
+        var synthesisJson =
+            """{"relevantColumns":["metric_a"],"ambiguities":[],"evidences":[{"sourceTool":"get_schema","summary":"ok","supportingJsonFragment":null}],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}""";
+
+        var chat = new QueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "ok", Name = "get_schema", ArgumentsJson = "{}" },
+                    new AgentToolCall { Id = "bad", Name = "made_up_tool", ArgumentsJson = "{}" }
+                ]
+            },
+            new AgentModelResponse { Model = "m", Content = string.Empty, FinishReason = "stop", ToolCalls = [] },
+            new AgentModelResponse { Model = "m", Content = synthesisJson, FinishReason = "stop" });
+
+        var worker = new SpecialistToolAgentWorker(options, runtime, chat, NullLogger.Instance);
+        var request = new AgentTaskRequest(
+            AgentSpecialistKind.QueryAnalysis,
+            "Question",
+            "dispatch",
+            new AgentConversationMemory(),
+            Array.Empty<AgentConversationMessage>(),
+            runtime.GetTools(),
+            "m",
+            "sys",
+            ExpectsDatasetQueryEvidence: false);
+
+        var result = await worker.ExecuteAsync(request, CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Equal(2, result.ToolExecutions.Count);
+        var bad = result.ToolExecutions.Single(e => e.ToolName.Equals("made_up_tool", StringComparison.OrdinalIgnoreCase));
+        Assert.True(bad.IsError);
+        var ok = result.ToolExecutions.Single(e => e.ToolName.Equals("get_schema", StringComparison.OrdinalIgnoreCase));
+        Assert.False(ok.IsError);
+        var serialized = JsonSerializer.Serialize(chat.Requests);
+        Assert.Contains("tool_not_on_specialist_allowlist", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RepeatedLengthWithoutToolCalls_RaisesToolTurnMaxThenRecoversWithGenericTool()
     {
         var options = new AgentOptions

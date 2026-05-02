@@ -23,8 +23,10 @@ internal static class MultiAgentPromptBuilder
     private const string GroupAndAggregateParameterContract = """
 group_and_aggregate (exact field names):
 - "groupByBins" MUST be a JSON array of objects; each object requires "columnName", "alias", and "binWidth" (number > 0). Bins are numeric bands only; nothing in the tool marks a band as special.
+- "groupByAutoBins" optional array: each item needs "columnName", "alias", "method" ("EqualWidth"|"Quantile"), optional "binCount" (2–100; default 10). Produces neutral numeric bin keys in the filtered scope.
+- "derivedMetrics" optional array: each item needs "alias" and "expression" (restricted + - * / over aggregation aliases and numeric grouping dimensions). Ratios such as subset_count/total_count belong here—not by renaming Count outputs.
 - "aggregations" is an array; each item requires "alias" and "function" (e.g. Count). Count with no per-aggregation "filter" counts every row in the group; Count with "filter" counts only rows matching that filter (same group keys). Different aggregations can mix filtered and unfiltered Count (e.g. aliases row_count vs event_count).
-- "sortRules" is an array of { "columnName": "...", "direction": "Ascending"|"Descending" } — columnName may reference a bin alias or an aggregation alias.
+- "sortRules" is an array of { "columnName": "...", "direction": "Ascending"|"Descending" } — columnName may reference a bin alias, an aggregation alias, or a derived metric alias.
 """;
 
     public static string BuildMinimalToolParametersContractHint()
@@ -85,9 +87,10 @@ Rules:
 - Use tools to retrieve facts; never invent dataset values.
 - Do not write the final user-facing answer.
 - Resolve exact column names with search_columns and/or get_schema before aggregates.
-- For histograms or numeric bands, use group_and_aggregate with groupByBins as an array of objects; each bin spec needs columnName, alias, and binWidth.
+- For histograms or numeric bands, use group_and_aggregate with groupByBins (fixed bin width) and/or groupByAutoBins (EqualWidth or Quantile on filtered rows); each manual bin spec needs columnName, alias, and binWidth.
 - Aggregations: use function names exactly as exposed by tools (e.g. Count). Count without a per-aggregation filter is group row count; add a filter on that aggregation for conditional/subset counts (same grouping, different aliases such as row_count vs event_count).
-- sortRules.columnName may reference a bin alias from groupByBins.
+- Use derivedMetrics for numeric ratios or differences built from those aggregation outputs (restricted expressions); do not treat an unfiltered Count alias text as proof of a conditional tally.
+- sortRules.columnName may reference bin aliases, aggregation aliases, or derived metric aliases.
 - Tools return tabular facts only; never encode conclusions, thresholds, or "critical" values in tool arguments.
 - On tool-enabled turns, emit the next tool_calls entry immediately; reserve longer explanation for the non-tool synthesis pass only.
 {extensionBlock}
@@ -142,8 +145,9 @@ Hard rules:
 - Keep exploratory answers short: about 120–180 words unless the user explicitly asked for a long report.
 - When the user only asks for suggested follow-up questions (e.g. "sugira uma pergunta"), answer in Portuguese with exactly three short bullet questions plus one recommended pick in a single short sentence — no long ML roadmap, no extended narrative, no tool requests.
 - Do not produce a lengthy ML plan or methodology essay unless the user explicitly asked for methodology depth.
-- When evidence includes paired counts such as event_count and row_count, clearly distinguish absolute counts from rates (e.g. event_count / row_count when both are present).
+- When evidence includes paired counts such as event_count and row_count, clearly distinguish absolute counts from rates; prefer explicit derivedMetrics rate columns from tool output when present—never infer a rate from a single Count column alone.
 - Tool envelopes may include aggregationRequestSummary for group_and_aggregate: use perAggregationFilterPresent — do not describe unfiltered Count as a conditional/event tally based only on the aggregation alias text.
+- When derivedMetricsSummary is present, treat those aliases as model-requested arithmetic on prior columns—still do not invent numbers not shown in tool rows or summaries.
 - When the user asks for “causes”, “causadores”, drivers, or what is “more responsible”, treat findings as observed association / co-occurrence in this dataset only — not proof of causal mechanisms — unless the user explicitly supplied an interventional study design (they did not).
 
 Output:

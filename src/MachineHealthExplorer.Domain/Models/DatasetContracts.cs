@@ -424,11 +424,50 @@ public sealed record NumericGroupBinSpec
     public double BinWidth { get; init; } = 1.0;
 }
 
+/// <summary>
+/// Automatic numeric binning in the filtered scope (equal-width or quantile-frequency).
+/// Bin keys written to <see cref="GroupAggregationRow"/> are numeric lower bounds for both methods so they can be sorted/filtered like manual bins.
+/// </summary>
+public enum GroupByAutoBinMethod
+{
+    EqualWidth = 0,
+    Quantile = 1
+}
+
+public sealed record NumericGroupAutoBinSpec
+{
+    public string ColumnName { get; init; } = string.Empty;
+    public string Alias { get; init; } = string.Empty;
+    public GroupByAutoBinMethod Method { get; init; } = GroupByAutoBinMethod.EqualWidth;
+    /// <summary>Number of bins; when omitted a conservative default (10) is applied at execution.</summary>
+    public int? BinCount { get; init; }
+}
+
+public sealed record DerivedMetricDefinition
+{
+    public string Alias { get; init; } = string.Empty;
+    /// <summary>Restricted arithmetic over aggregation aliases and numeric grouping dimensions (identifiers, + - * / parentheses, numeric literals).</summary>
+    public string Expression { get; init; } = string.Empty;
+}
+
+/// <summary>Neutral summary of an applied auto-bin dimension (for model-facing JSON).</summary>
+public sealed record GroupByAutoBinAppliedSummary
+{
+    public string Alias { get; init; } = string.Empty;
+    public string Method { get; init; } = string.Empty;
+    public int BinCount { get; init; }
+    public double? ScopedMin { get; init; }
+    public double? ScopedMax { get; init; }
+    public int DistinctBinKeysObserved { get; init; }
+}
+
 public sealed record GroupAggregationRequest
 {
     public IReadOnlyList<string> GroupByColumns { get; init; } = Array.Empty<string>();
     public IReadOnlyList<NumericGroupBinSpec> GroupByBins { get; init; } = Array.Empty<NumericGroupBinSpec>();
+    public IReadOnlyList<NumericGroupAutoBinSpec> GroupByAutoBins { get; init; } = Array.Empty<NumericGroupAutoBinSpec>();
     public IReadOnlyList<AggregationDefinition> Aggregations { get; init; } = Array.Empty<AggregationDefinition>();
+    public IReadOnlyList<DerivedMetricDefinition> DerivedMetrics { get; init; } = Array.Empty<DerivedMetricDefinition>();
     public FilterExpression? Filter { get; init; }
     public FilterExpression? Having { get; init; }
     public IReadOnlyList<SortRule> SortRules { get; init; } = Array.Empty<SortRule>();
@@ -451,6 +490,7 @@ public sealed record GroupAggregationResult
     public int TotalGroups { get; init; }
     public int Page { get; init; }
     public int PageSize { get; init; }
+    public IReadOnlyList<GroupByAutoBinAppliedSummary> GroupByAutoBinsApplied { get; init; } = Array.Empty<GroupByAutoBinAppliedSummary>();
 }
 
 public sealed record ColumnProfilingRequest

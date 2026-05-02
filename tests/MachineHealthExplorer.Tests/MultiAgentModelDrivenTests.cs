@@ -158,6 +158,8 @@ public sealed class MultiAgentModelDrivenTests
             Assert.Equal("array", sort.GetProperty("type").GetString());
             var sortItem = sort.GetProperty("items");
             Assert.True(sortItem.GetProperty("properties").TryGetProperty("columnName", out _));
+            Assert.True(props.TryGetProperty("derivedMetrics", out _));
+            Assert.True(props.TryGetProperty("groupByAutoBins", out _));
         }
     }
 

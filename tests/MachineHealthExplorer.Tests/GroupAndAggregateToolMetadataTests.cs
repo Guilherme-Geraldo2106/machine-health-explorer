@@ -30,6 +30,8 @@ public sealed class GroupAndAggregateToolMetadataTests
         Assert.Contains("row_count", tool.Description, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("event_count", tool.Description, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("groupByBins", tool.Description, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("groupByAutoBins", tool.Description, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("derivedMetrics", tool.Description, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("numeric", tool.Description, StringComparison.OrdinalIgnoreCase);
 
         foreach (var forbidden in ForbiddenDatasetColumnSnippets)
@@ -78,6 +80,8 @@ public sealed class GroupAndAggregateToolMetadataTests
         Assert.Contains("\"row_count\"", minimal, StringComparison.Ordinal);
         Assert.Contains("\"event_count\"", minimal, StringComparison.Ordinal);
         Assert.Contains("Count with no per-aggregation", compact, StringComparison.Ordinal);
+        Assert.Contains("derivedMetrics", compact, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("groupByAutoBins", compact, StringComparison.OrdinalIgnoreCase);
 
         foreach (var forbidden in ForbiddenDatasetColumnSnippets)
         {
