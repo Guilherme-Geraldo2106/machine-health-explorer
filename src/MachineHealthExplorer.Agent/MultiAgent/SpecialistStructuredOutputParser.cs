@@ -49,7 +49,8 @@ internal static class SpecialistStructuredOutputParser
     public static AgentStructuredSpecialistOutput FromToolFallback(
         AgentSpecialistKind kind,
         IReadOnlyList<AgentToolExecutionRecord> toolExecutions,
-        int toolEvidenceMaxChars)
+        int toolEvidenceMaxChars,
+        IReadOnlyList<string>? modelVisibleTechnicalGaps = null)
     {
         var evidences = new List<AgentEvidence>();
         var safeBudget = Math.Clamp(toolEvidenceMaxChars, 512, 200_000);
@@ -79,6 +80,14 @@ internal static class SpecialistStructuredOutputParser
                 fragment));
         }
 
+        var analystNotes = "Structured synthesis unavailable; using compact tool-output envelopes (model-visible).";
+        if (modelVisibleTechnicalGaps is { Count: > 0 })
+        {
+            analystNotes += " Technical evidence gaps for downstream response: "
+                + string.Join("; ", modelVisibleTechnicalGaps.Distinct(StringComparer.Ordinal))
+                + ".";
+        }
+
         return new AgentStructuredSpecialistOutput(
             kind,
             RelevantColumns: Array.Empty<string>(),
@@ -88,7 +97,7 @@ internal static class SpecialistStructuredOutputParser
             ObjectiveObservations: Array.Empty<string>(),
             HypothesesOrCaveats: Array.Empty<string>(),
             ReportSections: Array.Empty<string>(),
-            AnalystNotes: "Structured synthesis unavailable; using compact tool-output envelopes (model-visible).");
+            analystNotes);
     }
 
     private static IReadOnlyList<AgentEvidence> ReadEvidences(JsonElement root)

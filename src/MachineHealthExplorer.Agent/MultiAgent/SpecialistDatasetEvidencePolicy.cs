@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MachineHealthExplorer.Agent.Models;
 
 namespace MachineHealthExplorer.Agent.MultiAgent;
@@ -213,6 +214,95 @@ internal static class SpecialistDatasetEvidencePolicy
     }
 
     /// <summary>
+    /// When explicit required_evidence no longer lists Aggregate but the dispatch still needs richer tabular depth,
+    /// keep <c>group_and_aggregate</c> on the exposed surface so the model can issue a corrective aggregate call.
+    /// </summary>
+    public static IReadOnlyList<AgentToolDefinition> EnsureAggregateRefinementToolOnSurface(
+        IReadOnlyList<AgentToolDefinition> scopedFullCatalog,
+        IReadOnlyList<AgentToolDefinition> chosenTurnCatalog,
+        AgentTaskRequest request,
+        IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        if (GetSupplementalAggregateDepthGaps(request, executions).Count == 0)
+        {
+            return chosenTurnCatalog;
+        }
+
+        var aggregateDef = scopedFullCatalog.FirstOrDefault(static t =>
+            string.Equals(t.Name, "group_and_aggregate", StringComparison.OrdinalIgnoreCase));
+        if (aggregateDef is null)
+        {
+            return chosenTurnCatalog;
+        }
+
+        if (chosenTurnCatalog.Any(static t =>
+                string.Equals(t.Name, "group_and_aggregate", StringComparison.OrdinalIgnoreCase)))
+        {
+            return chosenTurnCatalog;
+        }
+
+        var merged = chosenTurnCatalog.ToList();
+        merged.Add(aggregateDef);
+        return merged;
+    }
+
+    /// <summary>
+    /// Model-visible gaps when a successful aggregate exists but request/dispatch signals need ratios,
+    /// richer dimensional grouping, or non-count numeric measures — without inspecting domain column names.
+    /// </summary>
+    public static IReadOnlyList<string> GetSupplementalAggregateDepthGaps(
+        AgentTaskRequest request,
+        IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        var list = new List<string>();
+        if (!request.ExpectsDatasetQueryEvidence || request.SpecialistKind == AgentSpecialistKind.Discovery)
+        {
+            return list;
+        }
+
+        if (!HasSuccessfulGroupAndAggregateExecution(executions))
+        {
+            return list;
+        }
+
+        var hay = BuildDispatchAnalyticalHaystack(request);
+        if (string.IsNullOrWhiteSpace(hay))
+        {
+            return list;
+        }
+
+        var hasDerived = AnyGroupAndAggregateArgumentsIncludeDerivedMetrics(executions);
+        var onlyCounts = OnlyCountAggregationsInSuccessfulGroupAndAggregate(executions);
+        var multiKeyOk = AnyGroupAndAggregateArgumentsSuggestMultiKeyGrouping(executions);
+
+        if (HaystackImpliesDerivedRatesOrProportionsOrRanking(hay) && !hasDerived)
+        {
+            list.Add("missing derived rate evidence");
+            if (onlyCounts)
+            {
+                list.Add("existing aggregate only has absolute counts");
+            }
+        }
+
+        if (HaystackImpliesMultiFactorCombination(hay) && !multiKeyOk)
+        {
+            list.Add("missing multi-factor grouping evidence");
+        }
+
+        if (HaystackImpliesNonCountNumericMeasure(hay) && onlyCounts && !hasDerived)
+        {
+            list.Add("missing numeric measure/aggregate evidence");
+        }
+
+        if (list.Count > 0)
+        {
+            list.Add("retry with group_and_aggregate if needed, choosing columns/filters/bins from schema yourself");
+        }
+
+        return list;
+    }
+
+    /// <summary>
     /// When the planner narrows the exposed tool list to aggregate-only but schema/columns are not yet evidenced,
     /// merge structural discovery tools from the specialist allowlist so the model can run get_schema/search_columns first.
     /// </summary>
@@ -301,20 +391,185 @@ internal static class SpecialistDatasetEvidencePolicy
             return gaps.Distinct(StringComparer.Ordinal).ToArray();
         }
 
-        if (HasSuccessfulGroupAndAggregateExecution(executions))
+        foreach (var supplemental in GetSupplementalAggregateDepthGaps(request, executions))
         {
-            if (!AnyGroupAndAggregateArgumentsIncludeDerivedMetrics(executions))
-            {
-                gaps.Add("missing derived rate evidence");
-            }
-
-            if (!AnyGroupAndAggregateArgumentsSuggestMultiKeyGrouping(executions))
-            {
-                gaps.Add("missing multi-factor grouping evidence");
-            }
+            gaps.Add(supplemental);
         }
 
         return gaps.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    private static string BuildDispatchAnalyticalHaystack(AgentTaskRequest request)
+    {
+        var q = request.UserQuestion ?? string.Empty;
+        var d = request.DispatchReason ?? string.Empty;
+        return $"{q} {d}".Trim().ToLowerInvariant();
+    }
+
+    private static bool HaystackImpliesDerivedRatesOrProportionsOrRanking(string hayLower)
+    {
+        if (ContainsWholeWord(hayLower, "rate")
+            || ContainsWholeWord(hayLower, "rates")
+            || ContainsWholeWord(hayLower, "ratio")
+            || ContainsWholeWord(hayLower, "ratios")
+            || hayLower.Contains("proportion", StringComparison.Ordinal)
+            || hayLower.Contains("percentage", StringComparison.Ordinal)
+            || hayLower.Contains("percentages", StringComparison.Ordinal)
+            || hayLower.Contains("taxa", StringComparison.Ordinal)
+            || hayLower.Contains("taxas", StringComparison.Ordinal)
+            || hayLower.Contains("proporção", StringComparison.Ordinal)
+            || hayLower.Contains("proporções", StringComparison.Ordinal)
+            || hayLower.Contains("ranking", StringComparison.Ordinal)
+            || hayLower.Contains("frequencies", StringComparison.Ordinal)
+            || hayLower.Contains("frequency", StringComparison.Ordinal)
+            || hayLower.Contains("association", StringComparison.Ordinal)
+            || hayLower.Contains("correlation", StringComparison.Ordinal)
+            || hayLower.Contains("correlate", StringComparison.Ordinal)
+            || hayLower.Contains("risco", StringComparison.Ordinal)
+            || ContainsWholeWord(hayLower, "risk")
+            || hayLower.Contains("grouped rates", StringComparison.Ordinal)
+            || hayLower.Contains("rates/", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool HaystackImpliesMultiFactorCombination(string hayLower)
+    {
+        if (hayLower.Contains("combination", StringComparison.Ordinal)
+            || hayLower.Contains("combinations", StringComparison.Ordinal)
+            || hayLower.Contains("combinação", StringComparison.Ordinal)
+            || hayLower.Contains("combinações", StringComparison.Ordinal)
+            || hayLower.Contains("combinaç", StringComparison.Ordinal)
+            || hayLower.Contains("multi-factor", StringComparison.Ordinal)
+            || hayLower.Contains("multifactor", StringComparison.Ordinal)
+            || hayLower.Contains("multiple variables", StringComparison.Ordinal)
+            || hayLower.Contains("interaction", StringComparison.Ordinal)
+            || hayLower.Contains("interactions", StringComparison.Ordinal)
+            || hayLower.Contains("cross-tab", StringComparison.Ordinal)
+            || hayLower.Contains("crosstab", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return ContainsWholeWord(hayLower, "joint")
+               && (hayLower.Contains("distribution", StringComparison.Ordinal)
+                   || hayLower.Contains("variable", StringComparison.Ordinal));
+    }
+
+    private static bool HaystackImpliesNonCountNumericMeasure(string hayLower)
+    {
+        if (hayLower.Contains("intensity", StringComparison.Ordinal)
+            || hayLower.Contains("magnitude", StringComparison.Ordinal)
+            || hayLower.Contains("extrema", StringComparison.Ordinal)
+            || hayLower.Contains("average", StringComparison.Ordinal)
+            || hayLower.Contains("median", StringComparison.Ordinal)
+            || ContainsWholeWord(hayLower, "mean")
+            || ContainsWholeWord(hayLower, "sum"))
+        {
+            return true;
+        }
+
+        return hayLower.Contains("numeric measure", StringComparison.Ordinal)
+               || hayLower.Contains("quantitative comparison", StringComparison.Ordinal);
+    }
+
+    private static bool ContainsWholeWord(string hayLower, string asciiWordLower)
+    {
+        foreach (Match match in Regex.Matches(hayLower, @"[\p{L}\p{Nd}_]+", RegexOptions.CultureInvariant))
+        {
+            if (match.Value.Equals(asciiWordLower, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool AnyGroupAndAggregateArgumentsSuggestMultiKeyGrouping(IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        foreach (var execution in executions)
+        {
+            if (execution.IsError
+                || !string.Equals(execution.ToolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (GroupAndAggregateArgumentsSuggestMultiKeyGrouping(execution.ArgumentsJson))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool OnlyCountAggregationsInSuccessfulGroupAndAggregate(IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        var saw = false;
+        foreach (var execution in executions)
+        {
+            if (execution.IsError
+                || !string.Equals(execution.ToolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            saw = true;
+            if (!AggregationsAreAllCount(execution.ArgumentsJson))
+            {
+                return false;
+            }
+        }
+
+        return saw;
+    }
+
+    private static bool AggregationsAreAllCount(string? argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson))
+        {
+            return true;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            if (!TryGetPropertyInsensitive(document.RootElement, "aggregations", out var aggs)
+                || aggs.ValueKind != JsonValueKind.Array
+                || aggs.GetArrayLength() == 0)
+            {
+                return true;
+            }
+
+            foreach (var item in aggs.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (!TryGetPropertyInsensitive(item, "function", out var fn) || fn.ValueKind != JsonValueKind.String)
+                {
+                    return false;
+                }
+
+                if (!string.Equals(fn.GetString(), "Count", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     private static bool HasSuccessfulGroupAndAggregateExecution(IReadOnlyList<AgentToolExecutionRecord> executions)
@@ -372,25 +627,6 @@ internal static class SpecialistDatasetEvidencePolicy
         {
             return false;
         }
-    }
-
-    private static bool AnyGroupAndAggregateArgumentsSuggestMultiKeyGrouping(IReadOnlyList<AgentToolExecutionRecord> executions)
-    {
-        foreach (var execution in executions)
-        {
-            if (execution.IsError
-                || !string.Equals(execution.ToolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (GroupAndAggregateArgumentsSuggestMultiKeyGrouping(execution.ArgumentsJson))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static bool GroupAndAggregateArgumentsSuggestMultiKeyGrouping(string? argumentsJson)

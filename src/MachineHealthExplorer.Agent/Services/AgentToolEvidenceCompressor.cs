@@ -89,6 +89,8 @@ internal static class AgentToolEvidenceCompressor
             normalized = TryNormalizeGetSchemaPayloadJson(normalized) ?? normalized;
         }
 
+        safeMax = ExpandCharBudgetForSmallTabularPreservation(toolName, normalized, safeMax);
+
         string body;
         if (normalized.Length <= safeMax)
         {
@@ -297,21 +299,22 @@ internal static class AgentToolEvidenceCompressor
             }
 
             var preview = obj["preview"]?.GetValue<string>() ?? string.Empty;
-            if (preview.Length <= safeMax)
+            var toolName = obj["tool"]?.GetValue<string>() ?? string.Empty;
+            var effectiveMax = ExpandCharBudgetForSmallTabularPreservation(toolName, preview, safeMax);
+            if (preview.Length <= effectiveMax)
             {
                 return content;
             }
 
-            var toolName = obj["tool"]?.GetValue<string>() ?? string.Empty;
             var slimPreview = StructuralSchemaTools.Contains(toolName)
                 ? TryNormalizeGetSchemaPayloadJson(preview) ?? preview
                 : preview;
-            var nextPreview = TryStructuralTabularCompact(toolName, slimPreview, safeMax)
-                ?? TryStructuralSchemaCompact(toolName, slimPreview, safeMax)
-                ?? string.Concat(slimPreview.AsSpan(0, safeMax), "…");
-            if (nextPreview.Length > safeMax)
+            var nextPreview = TryStructuralTabularCompact(toolName, slimPreview, effectiveMax)
+                ?? TryStructuralSchemaCompact(toolName, slimPreview, effectiveMax)
+                ?? string.Concat(slimPreview.AsSpan(0, effectiveMax), "…");
+            if (nextPreview.Length > effectiveMax)
             {
-                nextPreview = string.Concat(nextPreview.AsSpan(0, safeMax), "…");
+                nextPreview = string.Concat(nextPreview.AsSpan(0, effectiveMax), "…");
             }
 
             obj["preview"] = nextPreview;
@@ -481,6 +484,7 @@ internal static class AgentToolEvidenceCompressor
 
     /// <summary>
     /// For large tabular tool JSON, preserve head/tail rows and counts instead of truncating raw JSON at an arbitrary byte offset.
+    /// For small tabular payloads (≤64 rows or ≤pageSize when pageSize is present), never omit middle rows: prefer numeric compaction.
     /// </summary>
     private static string? TryStructuralTabularCompact(string toolName, string json, int maxChars)
     {
@@ -520,19 +524,12 @@ internal static class AgentToolEvidenceCompressor
             return null;
         }
 
-        if (totalRows <= 64)
-        {
-            var full = new JsonObject();
-            foreach (var pair in root)
-            {
-                full[pair.Key] = pair.Key == "rows" ? rows.DeepClone() : pair.Value?.DeepClone();
-            }
+        var pageSizeHint = TryReadOptionalPositiveInt(root, "pageSize");
+        var preserveAllRows = IsSmallTabularRowCount(totalRows, pageSizeHint);
 
-            var fullText = full.ToJsonString(AgentJsonSerializer.Options);
-            if (fullText.Length <= maxChars)
-            {
-                return fullText;
-            }
+        if (preserveAllRows)
+        {
+            return TryCompactSmallTabularPreservingAllRows(root, rows, maxChars);
         }
 
         var head = 18;
@@ -580,5 +577,169 @@ internal static class AgentToolEvidenceCompressor
         }
 
         return null;
+    }
+
+    private static int ExpandCharBudgetForSmallTabularPreservation(string toolName, string tabularJson, int requestedMax)
+    {
+        if (!StructuralTabularTools.Contains(toolName) || string.IsNullOrWhiteSpace(tabularJson))
+        {
+            return requestedMax;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(tabularJson) is not JsonObject root)
+            {
+                return requestedMax;
+            }
+
+            if (FindPropertyIgnoreCase(root, "rows")?.AsArray() is not { } rows || rows.Count == 0)
+            {
+                return requestedMax;
+            }
+
+            var pageSize = TryReadOptionalPositiveInt(root, "pageSize");
+            if (!IsSmallTabularRowCount(rows.Count, pageSize))
+            {
+                return requestedMax;
+            }
+
+            var len = tabularJson.Length;
+            const int hardCap = 24_000;
+            return Math.Min(hardCap, Math.Max(requestedMax, len));
+        }
+        catch (JsonException)
+        {
+            return requestedMax;
+        }
+    }
+
+    private static bool IsSmallTabularRowCount(int rowCount, int? pageSize)
+        => rowCount <= 64 || (pageSize is > 0 && rowCount <= pageSize.Value);
+
+    private static int? TryReadOptionalPositiveInt(JsonObject root, string propertyName)
+    {
+        var node = FindPropertyIgnoreCase(root, propertyName);
+        if (node is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var value = node.GetValue<int>();
+            return value > 0 ? value : null;
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static string? TryCompactSmallTabularPreservingAllRows(JsonObject root, JsonArray rows, int maxChars)
+    {
+        for (var decimals = 8; decimals >= 0; decimals--)
+        {
+            var full = CloneTabularRootForRows(root, rows);
+            RoundNumericLeavesUnderValues(full, decimals);
+            TrimHeavyAutoBinObservedBands(full);
+            var text = full.ToJsonString(AgentJsonSerializer.Options);
+            if (text.Length <= maxChars)
+            {
+                return text;
+            }
+        }
+
+        var lastAttempt = CloneTabularRootForRows(root, rows);
+        TrimHeavyAutoBinObservedBands(lastAttempt);
+        RoundNumericLeavesUnderValues(lastAttempt, 0);
+        return lastAttempt.ToJsonString(AgentJsonSerializer.Options);
+    }
+
+    private static JsonObject CloneTabularRootForRows(JsonObject root, JsonArray rows)
+    {
+        var full = new JsonObject();
+        foreach (var pair in root)
+        {
+            full[pair.Key] = pair.Key.Equals("rows", StringComparison.OrdinalIgnoreCase)
+                ? rows.DeepClone()
+                : pair.Value?.DeepClone();
+        }
+
+        return full;
+    }
+
+    private static void TrimHeavyAutoBinObservedBands(JsonObject root)
+    {
+        var applied = FindPropertyIgnoreCase(root, "groupByAutoBinsApplied")?.AsArray();
+        if (applied is null || applied.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var item in applied)
+        {
+            if (item is not JsonObject summary)
+            {
+                continue;
+            }
+
+            var observed = FindPropertyIgnoreCase(summary, "observedBins")?.AsArray()
+                           ?? FindPropertyIgnoreCase(summary, "ObservedBins")?.AsArray();
+            if (observed is null || observed.Count <= 12)
+            {
+                continue;
+            }
+
+            var trimmed = new JsonArray();
+            for (var i = 0; i < Math.Min(observed.Count, 12); i++)
+            {
+                trimmed.Add(observed[i]?.DeepClone());
+            }
+
+            if (FindPropertyIgnoreCase(summary, "observedBins") is not null)
+            {
+                summary["observedBins"] = trimmed;
+            }
+            else if (FindPropertyIgnoreCase(summary, "ObservedBins") is not null)
+            {
+                summary["ObservedBins"] = trimmed;
+            }
+        }
+    }
+
+    private static void RoundNumericLeavesUnderValues(JsonObject root, int fractionalDigits)
+    {
+        if (FindPropertyIgnoreCase(root, "rows")?.AsArray() is not { } rowNodes)
+        {
+            return;
+        }
+
+        foreach (var row in rowNodes)
+        {
+            if (row is not JsonObject rowObj)
+            {
+                continue;
+            }
+
+            var values = FindPropertyIgnoreCase(rowObj, "values")?.AsObject();
+            if (values is null)
+            {
+                continue;
+            }
+
+            foreach (var key in values.Select(p => p.Key).ToArray())
+            {
+                var val = values[key];
+                if (val is JsonValue jv && jv.TryGetValue<double>(out var d))
+                {
+                    values[key] = Math.Round(d, fractionalDigits, MidpointRounding.AwayFromZero);
+                }
+            }
+        }
     }
 }

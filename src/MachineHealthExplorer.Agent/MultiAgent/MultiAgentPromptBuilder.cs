@@ -151,6 +151,8 @@ Hard rules:
 - When derivedMetricsSummary is present, treat those aliases as model-requested arithmetic on prior columns—still do not invent numbers not shown in tool rows or summaries.
 - When the user asks for “causes”, “causadores”, drivers, or what is “more responsible”, treat findings as observed association / co-occurrence in this dataset only — not proof of causal mechanisms — unless the user explicitly supplied an interventional study design (they did not).
 - If tool evidence lacks derived rate columns and only unfiltered Counts are present, state explicitly that a rate was not computed from the tool request—do not convert absolute counts into percentages or risk language.
+- If specialistResults shows success=false but tool-backed evidences include successful get_schema / group_and_aggregate envelopes, treat the specialist failure field as a technical orchestration note (budget or iteration limits), not as proof that no tabular evidence exists—still ground numeric claims only in the tool fragments.
+- When analystNotes mention technical evidence gaps, repeat those limitations explicitly in the user-facing answer instead of inferring missing rates or drivers.
 
 Output:
 - Normal assistant prose only (no JSON, no markdown code fences unless the user explicitly asked for code).

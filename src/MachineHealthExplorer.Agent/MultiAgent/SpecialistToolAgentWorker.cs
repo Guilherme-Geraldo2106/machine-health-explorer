@@ -116,11 +116,17 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 ? SpecialistDatasetEvidencePolicy.FilterToolsSatisfyingAnyKind(scopedTools, missingEvidenceKinds, executedTools)
                 : scopedTools;
             var toolsForTurn = explicitEvidencePlan
-                               && narrowedCatalog.Count > 0
-                               && narrowedCatalog.Count < scopedTools.Count
-                               && missingEvidenceKinds.Count > 0
+                   && narrowedCatalog.Count > 0
+                   && narrowedCatalog.Count < scopedTools.Count
+                   && missingEvidenceKinds.Count > 0
                 ? narrowedCatalog
                 : scopedTools;
+
+            toolsForTurn = SpecialistDatasetEvidencePolicy.EnsureAggregateRefinementToolOnSurface(
+                scopedTools,
+                toolsForTurn,
+                request,
+                executedTools);
 
             var catalogToolNames = string.Join(", ", toolsForTurn.Select(t => t.Name));
             var toolsExposedForModelTurn = toolsForTurn;
@@ -315,14 +321,22 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                         safeFloor,
                         toolsExposedForModelTurn))
                 {
+                    var supplementalGaps = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(
+                        request,
+                        executedTools);
                     var budgetExhaustedOutput = SpecialistStructuredOutputParser.FromToolFallback(
                         kind,
                         executedTools,
-                        ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
+                        ResolveToolEvidenceBudgetForFallback(estimatedPrompt),
+                        supplementalGaps);
                     return new AgentTaskResult(
                         kind,
-                        Success: false,
-                        FailureMessage: ContextBudgetToolCallFailureMessage,
+                        Success: executedTools.Exists(static e => !e.IsError),
+                        FailureMessage: ResolveBudgetOrIterationFailureMessage(
+                            request,
+                            executedTools,
+                            tightContextBudget: true,
+                            ContextBudgetToolCallFailureMessage),
                         executedTools,
                         budgetExhaustedOutput,
                         conversation.ToArray());
@@ -353,14 +367,22 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
 
             if (scopedTools.Count > 0 && toolTurnMaxOut < safeFloor)
             {
+                var supplementalGaps = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(
+                    request,
+                    executedTools);
                 var budgetExhaustedOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt),
+                    supplementalGaps);
                 return new AgentTaskResult(
                     kind,
-                    Success: false,
-                    FailureMessage: ContextBudgetToolCallFailureMessage,
+                    Success: executedTools.Exists(static e => !e.IsError),
+                    FailureMessage: ResolveBudgetOrIterationFailureMessage(
+                        request,
+                        executedTools,
+                        tightContextBudget: true,
+                        ContextBudgetToolCallFailureMessage),
                     executedTools,
                     budgetExhaustedOutput,
                     conversation.ToArray());
@@ -377,10 +399,14 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     continue;
                 }
 
+                var supplementalGaps = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(
+                    request,
+                    executedTools);
                 var fallbackOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt),
+                    supplementalGaps);
                 return new AgentTaskResult(
                     kind,
                     Success: true,
@@ -489,14 +515,24 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     request.SpecialistSystemPrompt,
                     conversation,
                     toolsExposedForModelTurn);
+                var supplementalGaps = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(
+                    request,
+                    executedTools);
                 var fallbackOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    ResolveToolEvidenceBudgetForFallback(promptAfterCatch));
+                    ResolveToolEvidenceBudgetForFallback(promptAfterCatch),
+                    supplementalGaps);
                 return new AgentTaskResult(
                     kind,
                     Success: executedTools.Any(e => !e.IsError),
-                    FailureMessage: executedTools.Any(e => !e.IsError) ? null : ex.Message,
+                    FailureMessage: executedTools.Any(e => !e.IsError)
+                        ? ResolveBudgetOrIterationFailureMessage(
+                            request,
+                            executedTools,
+                            tightContextBudget: true,
+                            ContextBudgetToolCallFailureMessage)
+                        : ex.Message,
                     executedTools,
                     fallbackOutput,
                     conversation.ToArray());
@@ -792,10 +828,14 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     request,
                     executedTools,
                     includeStructuralSupplementalHints: true);
+                var supplementalForTruncated = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(
+                    request,
+                    executedTools);
                 var truncatedOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt),
+                    supplementalForTruncated);
                 var truncatedSuccess = truncatedMissing.Count == 0;
                 var truncatedFailure = truncatedSuccess
                     ? null
@@ -917,10 +957,14 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             request.SpecialistSystemPrompt,
             conversation,
             scopedTools);
+        var supplementalForExhausted = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(
+            request,
+            executedTools);
         var exhaustedOutput = SpecialistStructuredOutputParser.FromToolFallback(
             kind,
             executedTools,
-            ResolveToolEvidenceBudgetForFallback(exhaustedPromptEst));
+            ResolveToolEvidenceBudgetForFallback(exhaustedPromptEst),
+            supplementalForExhausted);
 
         return new AgentTaskResult(
             kind,
@@ -1042,6 +1086,40 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
             surfaceForEstimate);
         var finalOut = ComputeToolCallMaxOutputTokens(finalEstimated, request, lastToolTurnUsage);
         return scopedTools.Count == 0 || finalOut >= safeFloor;
+    }
+
+    private static string? ResolveBudgetOrIterationFailureMessage(
+        AgentTaskRequest request,
+        IReadOnlyList<AgentToolExecutionRecord> executedTools,
+        bool tightContextBudget,
+        string? defaultWhenNoSuccessfulTools)
+    {
+        if (!executedTools.Any(static e => !e.IsError))
+        {
+            return defaultWhenNoSuccessfulTools;
+        }
+
+        var requiredMissing = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
+        var fullGaps = SpecialistDatasetEvidencePolicy.BuildTechnicalEvidenceGapMessages(
+            request,
+            executedTools,
+            includeStructuralSupplementalHints: true);
+
+        if (requiredMissing.Count > 0 && fullGaps.Count > 0)
+        {
+            return string.Join("; ", fullGaps);
+        }
+
+        var supplemental = SpecialistDatasetEvidencePolicy.GetSupplementalAggregateDepthGaps(request, executedTools);
+        if (supplemental.Count > 0)
+        {
+            var suffix = tightContextBudget
+                ? " Context/completion budget was tight before another corrective tool_call could be produced."
+                : string.Empty;
+            return string.Join("; ", supplemental) + suffix;
+        }
+
+        return null;
     }
 
     internal static string BuildLengthTruncationRecoveryUserContent(

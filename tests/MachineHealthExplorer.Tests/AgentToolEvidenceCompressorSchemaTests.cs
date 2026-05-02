@@ -1,5 +1,7 @@
+using System.Text;
 using System.Text.Json;
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.MultiAgent;
 using MachineHealthExplorer.Agent.Services;
 
 namespace MachineHealthExplorer.Tests;
@@ -38,5 +40,62 @@ public sealed class AgentToolEvidenceCompressorSchemaTests
         Assert.Equal(2, summary.GetArrayLength());
         Assert.False(summary[0].GetProperty("perAggregationFilterPresent").GetBoolean());
         Assert.True(summary[1].GetProperty("perAggregationFilterPresent").GetBoolean());
+    }
+
+    [Fact]
+    public void BuildToolMessageContent_GroupAndAggregate_FullPageSmallResultPreservesAllRowsNotRowsFirstLast()
+    {
+        var rowsJson = new StringBuilder();
+        rowsJson.Append('[');
+        for (var i = 0; i < 50; i++)
+        {
+            if (i > 0)
+            {
+                rowsJson.Append(',');
+            }
+
+            rowsJson.Append("{\"values\":{\"Type\":\"M\",\"Air temperature [K]\":298.");
+            rowsJson.Append(i % 9);
+            rowsJson.Append(",\"Process temperature [K]\":308.6,\"row_count\":1,\"failure_count\":0}}");
+        }
+
+        rowsJson.Append(']');
+
+        var wideJson =
+            $$"""{"columns":["Type","Air temperature [K]","Process temperature [K]","row_count","failure_count"],"rows":{{rowsJson}},"scopedRowCount":10000,"totalGroups":3109,"page":1,"pageSize":50}""";
+
+        var args =
+            """{"aggregations":[{"alias":"row_count","function":"Count"},{"alias":"failure_count","function":"Count","filter":{"columnName":"Machine failure","operator":"equals","value":true}}],"pageSize":50}""";
+
+        var envelopeJson = AgentToolEvidenceCompressor.BuildToolMessageContent(
+            "group_and_aggregate",
+            wideJson,
+            maxChars: 2200,
+            args);
+
+        using var outer = JsonDocument.Parse(envelopeJson);
+        var preview = outer.RootElement.GetProperty("preview").GetString() ?? string.Empty;
+        Assert.DoesNotContain("rowsFirst", preview, StringComparison.Ordinal);
+        Assert.DoesNotContain("omittedMiddleRowCount", preview, StringComparison.Ordinal);
+
+        using var inner = JsonDocument.Parse(preview);
+        Assert.Equal(50, inner.RootElement.GetProperty("rows").GetArrayLength());
+
+        var summary = outer.RootElement.GetProperty("aggregationRequestSummary");
+        Assert.False(summary[0].GetProperty("perAggregationFilterPresent").GetBoolean());
+        Assert.True(summary[1].GetProperty("perAggregationFilterPresent").GetBoolean());
+    }
+
+    [Fact]
+    public void FromToolFallback_IncludesTechnicalGapsInAnalystNotes()
+    {
+        var gaps = new[] { "missing derived rate evidence" };
+        var structured = SpecialistStructuredOutputParser.FromToolFallback(
+            AgentSpecialistKind.QueryAnalysis,
+            Array.Empty<AgentToolExecutionRecord>(),
+            1024,
+            gaps);
+
+        Assert.Contains("missing derived rate evidence", structured.AnalystNotes, StringComparison.Ordinal);
     }
 }
