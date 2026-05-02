@@ -45,6 +45,12 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
     public Task<AgentTaskResult> ExecuteAsync(AgentTaskRequest request, CancellationToken cancellationToken = default)
         => ExecuteCoreAsync(request, cancellationToken);
 
+    private int ResolveToolEvidenceBudgetForFallback(int? estimatedPromptTokens = null)
+    {
+        var est = Math.Max(512, estimatedPromptTokens ?? 2048);
+        return AgentToolEvidenceCompressor.ComputeMaxToolEvidenceChars(_options, est);
+    }
+
     private async Task<AgentTaskResult> ExecuteCoreAsync(AgentTaskRequest request, CancellationToken cancellationToken)
     {
         var kind = request.SpecialistKind;
@@ -312,7 +318,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     var budgetExhaustedOutput = SpecialistStructuredOutputParser.FromToolFallback(
                         kind,
                         executedTools,
-                        digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                        ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
                     return new AgentTaskResult(
                         kind,
                         Success: false,
@@ -350,7 +356,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 var budgetExhaustedOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
                 return new AgentTaskResult(
                     kind,
                     Success: false,
@@ -374,11 +380,11 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 var fallbackOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
                 return new AgentTaskResult(
                     kind,
                     Success: true,
-                    FailureMessage: "Insufficient context budget after tool execution; returning structured tool fallback.",
+                    FailureMessage: null,
                     executedTools,
                     fallbackOutput,
                     conversation.ToArray());
@@ -478,14 +484,19 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     continue;
                 }
 
+                var promptAfterCatch = AgentContextBudgetEstimator.EstimatePromptTokens(
+                    _options,
+                    request.SpecialistSystemPrompt,
+                    conversation,
+                    toolsExposedForModelTurn);
                 var fallbackOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                    ResolveToolEvidenceBudgetForFallback(promptAfterCatch));
                 return new AgentTaskResult(
                     kind,
-                    Success: executedTools.Count > 0,
-                    FailureMessage: ex.Message,
+                    Success: executedTools.Any(e => !e.IsError),
+                    FailureMessage: executedTools.Any(e => !e.IsError) ? null : ex.Message,
                     executedTools,
                     fallbackOutput,
                     conversation.ToArray());
@@ -767,22 +778,34 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     conversation.Add(new AgentConversationMessage
                     {
                         Role = AgentConversationRole.User,
-                        Content = BuildLengthTruncationRecoveryUserMessage(executedTools)
+                        Content = BuildLengthTruncationRecoveryUserContent(
+                            executedTools,
+                            toolsExposedForModelTurn.Select(t => t.Name).ToArray(),
+                            request.UseFullToolSchemas)
                     });
                     requireToolCallNextTurn = true;
                     continue;
                 }
 
+                var truncatedMissing = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
+                var truncatedGaps = SpecialistDatasetEvidencePolicy.BuildTechnicalEvidenceGapMessages(
+                    request,
+                    executedTools,
+                    includeStructuralSupplementalHints: true);
                 var truncatedOutput = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt));
+                var truncatedSuccess = truncatedMissing.Count == 0;
+                var truncatedFailure = truncatedSuccess
+                    ? null
+                    : (truncatedGaps.Count > 0
+                        ? string.Join("; ", truncatedGaps)
+                        : "Tool-enabled output was truncated before a further tool_call under recovery limits while required generic evidence categories remained unsatisfied.");
                 return new AgentTaskResult(
                     kind,
-                    Success: executedTools.Count > 0,
-                    FailureMessage: executedTools.Count > 0
-                        ? null
-                        : "Rodada com tools truncada (finish_reason=length) sem tool_calls após recuperação direta; orçamento ou modelo não emitiu JSON de tool a tempo.",
+                    Success: truncatedSuccess,
+                    FailureMessage: truncatedFailure,
                     executedTools,
                     truncatedOutput,
                     conversation.ToArray());
@@ -834,7 +857,12 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     var pseudoFallback = SpecialistStructuredOutputParser.FromToolFallback(
                         kind,
                         executedTools,
-                        digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                        ResolveToolEvidenceBudgetForFallback(
+                            AgentContextBudgetEstimator.EstimatePromptTokens(
+                                _options,
+                                request.SpecialistSystemPrompt,
+                                conversation,
+                                scopedTools)));
                     return new AgentTaskResult(
                         kind,
                         Success: false,
@@ -870,18 +898,33 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 conversation.ToArray());
         }
 
-        var exhaustedFailure = encounteredTruncationWithoutTools
-            ? "Specialist tool turn was repeatedly truncated before producing required tool evidence."
-            : "Specialist tool iteration budget exhausted before producing structured output.";
+        var exhaustedMissing = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
+        var exhaustedGaps = SpecialistDatasetEvidencePolicy.BuildTechnicalEvidenceGapMessages(
+            request,
+            executedTools,
+            includeStructuralSupplementalHints: true);
+        var exhaustedSuccess = exhaustedMissing.Count == 0;
+        var exhaustedFailure = exhaustedSuccess
+            ? null
+            : (exhaustedGaps.Count > 0
+                ? string.Join("; ", exhaustedGaps)
+                : (encounteredTruncationWithoutTools
+                    ? "Tool-enabled output was truncated before tool_calls under iteration limits while required generic evidence categories remained unsatisfied."
+                    : "Specialist tool iteration budget exhausted before producing structured output."));
 
+        var exhaustedPromptEst = AgentContextBudgetEstimator.EstimatePromptTokens(
+            _options,
+            request.SpecialistSystemPrompt,
+            conversation,
+            scopedTools);
         var exhaustedOutput = SpecialistStructuredOutputParser.FromToolFallback(
             kind,
             executedTools,
-            digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+            ResolveToolEvidenceBudgetForFallback(exhaustedPromptEst));
 
         return new AgentTaskResult(
             kind,
-            Success: executedTools.Count > 0,
+            Success: exhaustedSuccess,
             FailureMessage: exhaustedFailure,
             executedTools,
             exhaustedOutput,
@@ -1001,14 +1044,32 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
         return scopedTools.Count == 0 || finalOut >= safeFloor;
     }
 
-    private static string BuildLengthTruncationRecoveryUserMessage(IReadOnlyList<AgentToolExecutionRecord> executedTools)
+    internal static string BuildLengthTruncationRecoveryUserContent(
+        IReadOnlyList<AgentToolExecutionRecord> executedTools,
+        IReadOnlyList<string> exposedToolNames,
+        bool useFullToolSchemas)
     {
+        var toolsLine = exposedToolNames.Count > 0
+            ? string.Join(
+                ", ",
+                exposedToolNames.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+            : "(none)";
+        var contract = useFullToolSchemas
+            ? MultiAgentPromptBuilder.BuildGroupAndAggregateCompactContractHint()
+            : MultiAgentPromptBuilder.BuildMinimalToolParametersContractHint();
+
         return $"""
-The previous tool-enabled assistant turn was truncated before emitting a tool call. Do not paste or replay prior hidden reasoning.
+Length recovery (model-visible): the previous tool-enabled assistant turn ended with finish_reason=length before any tool_calls. Do not paste or replay prior hidden reasoning.
 
-Executed tools so far (compact): {SpecialistToolTurnBudgetRecovery.BuildExecutedToolsSummary(executedTools)}
+Exposed tool names (you may only call tools from this set): {toolsLine}
 
-Continue now: prefer one compact tool_calls JSON entry with minimal visible prose if more data is needed; otherwise reply with exactly this single line and nothing else: DONE_NO_MORE_TOOLS
+Compact tabular contract (shape reference only; choose columns/filters yourself):
+{contract}
+
+Executed tools so far (names/status only): {SpecialistToolTurnBudgetRecovery.BuildExecutedToolsSummary(executedTools)}
+
+You MUST emit exactly one valid tool_calls entry now with minimal JSON arguments, or reply with exactly this single line and nothing else:
+DONE_NO_MORE_TOOLS
 """;
     }
 
@@ -1086,7 +1147,12 @@ If you choose DONE_NO_MORE_TOOLS, add a single technical justification line expl
                 var pseudoFallback = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     executedTools,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200));
+                    ResolveToolEvidenceBudgetForFallback(
+                        AgentContextBudgetEstimator.EstimatePromptTokens(
+                            _options,
+                            request.SpecialistSystemPrompt,
+                            conversation,
+                            Array.Empty<AgentToolDefinition>())));
                 return new AgentTaskResult(
                     kind,
                     Success: false,
@@ -1153,7 +1219,7 @@ If you choose DONE_NO_MORE_TOOLS, add a single technical justification line expl
                 SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     toolExecutions,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200)));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt)));
         }
 
         maxOut = Math.Min(maxOut, Math.Max(256, _options.MultiAgent.SpecialistSynthesisMaxOutputTokens));
@@ -1189,7 +1255,7 @@ If you choose DONE_NO_MORE_TOOLS, add a single technical justification line expl
                 SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
                     toolExecutions,
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200)));
+                    ResolveToolEvidenceBudgetForFallback(estimatedPrompt)));
         }
 
         var surface = AgentToolScopePlanner.CombinePlannerSurface(response.Content, response.ReasoningContent);
@@ -1212,7 +1278,7 @@ If you choose DONE_NO_MORE_TOOLS, add a single technical justification line expl
             SpecialistStructuredOutputParser.FromToolFallback(
                 kind,
                 toolExecutions,
-                digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200)));
+                ResolveToolEvidenceBudgetForFallback(estimatedPrompt)));
     }
 
     internal static void AppendAssistantTurnFromModel(List<AgentConversationMessage> conversation, AgentModelResponse response)
@@ -1275,7 +1341,7 @@ Instructions:
         }
 
         var cap = AgentContextBudgetEstimator.ComputeToolTurnDynamicOutputCap(_options, lastUsage);
-        var merged = Math.Min(effective, cap);
+        var merged = Math.Min(_options.MaxOutputTokens, Math.Max(effective, cap));
         if (request.ToolTurnMaxOutputTokensCap is { } hardCap)
         {
             merged = Math.Min(merged, Math.Max(96, hardCap));
@@ -1334,7 +1400,7 @@ You must return ONLY JSON (no markdown fences) with this shape:
 
 Rules:
 - keyMetrics must be an object whose values are numbers only (omit unknowns).
-- For group_and_aggregate, only treat a Count as a conditional/subset tally when the tool request (see aggregationRequestSummary in tool envelopes) shows a per-aggregation filter; unfiltered Count is a group row tally even if the alias suggests events.
+- For group_and_aggregate, only treat a Count as a conditional/subset tally when the tool request (see aggregationRequestSummary inside mhe_tool_evidence_v1 tool envelopes / supportingJsonFragment) shows a per-aggregation filter; unfiltered Count is a group row tally even if the alias suggests events.
 - Do not invent dataset values; ground summaries in the transcript tool outputs.
 - Keep lists short and high-signal.
 - Keep each supportingJsonFragment under 600 characters when possible.

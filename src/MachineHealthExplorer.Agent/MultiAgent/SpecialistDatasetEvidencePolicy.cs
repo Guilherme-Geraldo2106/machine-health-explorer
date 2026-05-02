@@ -271,4 +271,178 @@ internal static class SpecialistDatasetEvidencePolicy
             return false;
         }
     }
+
+    /// <summary>
+    /// Generic, model-visible gap phrases derived from tool names/JSON shapes only (no user-text heuristics).
+    /// </summary>
+    public static IReadOnlyList<string> BuildTechnicalEvidenceGapMessages(
+        AgentTaskRequest request,
+        IReadOnlyList<AgentToolExecutionRecord> executions,
+        bool includeStructuralSupplementalHints)
+    {
+        var gaps = new List<string>();
+        foreach (var missing in GetMissingRequiredEvidenceKinds(request, executions))
+        {
+            gaps.Add(missing switch
+            {
+                AgentEvidenceKind.Aggregate => "missing aggregate evidence",
+                AgentEvidenceKind.Profile => "missing numeric distribution/profile evidence",
+                AgentEvidenceKind.DistinctValues => "missing distinct-value cardinality evidence",
+                AgentEvidenceKind.RowSample => "missing row-sample evidence",
+                AgentEvidenceKind.StructuralSchema => "missing schema/column listing evidence",
+                _ => $"missing evidence kind:{missing}"
+            });
+        }
+
+        if (!includeStructuralSupplementalHints
+            || !request.ExpectsDatasetQueryEvidence
+            || request.SpecialistKind == AgentSpecialistKind.Discovery)
+        {
+            return gaps.Distinct(StringComparer.Ordinal).ToArray();
+        }
+
+        if (HasSuccessfulGroupAndAggregateExecution(executions))
+        {
+            if (!AnyGroupAndAggregateArgumentsIncludeDerivedMetrics(executions))
+            {
+                gaps.Add("missing derived rate evidence");
+            }
+
+            if (!AnyGroupAndAggregateArgumentsSuggestMultiKeyGrouping(executions))
+            {
+                gaps.Add("missing multi-factor grouping evidence");
+            }
+        }
+
+        return gaps.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    private static bool HasSuccessfulGroupAndAggregateExecution(IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        foreach (var execution in executions)
+        {
+            if (!execution.IsError
+                && string.Equals(execution.ToolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool AnyGroupAndAggregateArgumentsIncludeDerivedMetrics(IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        foreach (var execution in executions)
+        {
+            if (execution.IsError
+                || !string.Equals(execution.ToolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (GroupAndAggregateArgumentsIncludeDerivedMetrics(execution.ArgumentsJson))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool GroupAndAggregateArgumentsIncludeDerivedMetrics(string? argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            if (!TryGetPropertyInsensitive(document.RootElement, "derivedMetrics", out var derived)
+                || derived.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            return derived.GetArrayLength() > 0;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool AnyGroupAndAggregateArgumentsSuggestMultiKeyGrouping(IReadOnlyList<AgentToolExecutionRecord> executions)
+    {
+        foreach (var execution in executions)
+        {
+            if (execution.IsError
+                || !string.Equals(execution.ToolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (GroupAndAggregateArgumentsSuggestMultiKeyGrouping(execution.ArgumentsJson))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool GroupAndAggregateArgumentsSuggestMultiKeyGrouping(string? argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            var root = document.RootElement;
+            var dimensions = 0;
+            if (TryGetPropertyInsensitive(root, "groupByColumns", out var columns)
+                && columns.ValueKind == JsonValueKind.Array)
+            {
+                dimensions += columns.GetArrayLength();
+            }
+
+            if (TryGetPropertyInsensitive(root, "groupByBins", out var bins)
+                && bins.ValueKind == JsonValueKind.Array)
+            {
+                dimensions += bins.GetArrayLength();
+            }
+
+            if (TryGetPropertyInsensitive(root, "groupByAutoBins", out var autoBins)
+                && autoBins.ValueKind == JsonValueKind.Array)
+            {
+                dimensions += autoBins.GetArrayLength();
+            }
+
+            return dimensions >= 2;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetPropertyInsensitive(JsonElement obj, string name, out JsonElement value)
+    {
+        foreach (var property in obj.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
 }

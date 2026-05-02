@@ -296,7 +296,7 @@ public sealed class MultiAgentModelDrivenTests
         var structured = SpecialistStructuredOutputParser.FromToolFallback(
             AgentSpecialistKind.QueryAnalysis,
             [getSchema, badGroup],
-            digestMaxChars: 400);
+            toolEvidenceMaxChars: 4000);
 
         var schemaHints = SchemaColumnNamesFromToolExecutions.Extract([getSchema, badGroup]);
 

@@ -284,7 +284,7 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
         var filteredRows = FilterRows(snapshot.Rows, request.Filter, schemaLookup);
 
         var autoBinMaps = BuildAutoBinRowMaps(filteredRows, autoBinSpecs);
-        var autoBinSummaries = BuildAutoBinAppliedSummaries(autoBinSpecs, autoBinMaps);
+        var autoBinSummaries = BuildAutoBinAppliedSummaries(filteredRows, autoBinSpecs, autoBinMaps);
 
         var groupedRows = binSpecs.Length == 0 && autoBinSpecs.Length == 0
             ? BuildGroups(filteredRows, groupByColumns)
@@ -763,6 +763,7 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
     }
 
     private static IReadOnlyList<GroupByAutoBinAppliedSummary> BuildAutoBinAppliedSummaries(
+        IReadOnlyList<DatasetRow> filteredRows,
         IReadOnlyList<NumericGroupAutoBinSpec> specs,
         IReadOnlyList<Dictionary<DatasetRow, double>> maps)
     {
@@ -776,17 +777,94 @@ public sealed class DatasetAnalyticsEngine : IDatasetAnalyticsEngine
         {
             var spec = specs[i];
             var map = maps[i];
-            var values = map.Values.ToArray();
-            var distinct = values.Distinct().Count();
-            var binCount = GroupByAutoBinAssignments.ResolveBinCount(spec.BinCount);
+            var column = spec.ColumnName.Trim();
+            var binCountEffective = GroupByAutoBinAssignments.ResolveBinCount(spec.BinCount);
+            GroupByAutoBinAssignments.ValidateBinCount(binCountEffective);
+
+            var bucketValues = new Dictionary<double, List<double>>();
+            foreach (var row in filteredRows)
+            {
+                if (!map.TryGetValue(row, out var lowerBound))
+                {
+                    continue;
+                }
+
+                if (!TryGetNumericMeasurement(GetValue(row, column), out var measurement))
+                {
+                    continue;
+                }
+
+                if (!bucketValues.TryGetValue(lowerBound, out var lst))
+                {
+                    lst = new List<double>();
+                    bucketValues[lowerBound] = lst;
+                }
+
+                lst.Add(measurement);
+            }
+
+            if (bucketValues.Count == 0)
+            {
+                list.Add(new GroupByAutoBinAppliedSummary
+                {
+                    Alias = spec.Alias.Trim(),
+                    ColumnName = column,
+                    Method = spec.Method.ToString(),
+                    BinCount = binCountEffective,
+                    RequestedBinCount = spec.BinCount,
+                    ScopedMin = null,
+                    ScopedMax = null,
+                    DistinctBinKeysObserved = 0,
+                    ObservedBins = Array.Empty<GroupByAutoBinObservedBand>()
+                });
+                continue;
+            }
+
+            var allNumeric = bucketValues.Values.SelectMany(v => v).ToArray();
+            var scopedMin = allNumeric.Min();
+            var scopedMax = allNumeric.Max();
+            var orderedLowers = bucketValues.Keys.OrderBy(x => x).ToArray();
+            var bands = new List<GroupByAutoBinObservedBand>();
+            if (spec.Method == GroupByAutoBinMethod.EqualWidth)
+            {
+                for (var idx = 0; idx < orderedLowers.Length; idx++)
+                {
+                    var lower = orderedLowers[idx];
+                    var values = bucketValues[lower];
+                    var upper = idx < orderedLowers.Length - 1 ? orderedLowers[idx + 1] : scopedMax;
+                    bands.Add(new GroupByAutoBinObservedBand
+                    {
+                        LowerBound = lower,
+                        UpperBound = upper,
+                        RowCount = values.Count
+                    });
+                }
+            }
+            else
+            {
+                foreach (var lower in orderedLowers)
+                {
+                    var values = bucketValues[lower];
+                    bands.Add(new GroupByAutoBinObservedBand
+                    {
+                        LowerBound = lower,
+                        UpperBound = values.Count > 0 ? values.Max() : null,
+                        RowCount = values.Count
+                    });
+                }
+            }
+
             list.Add(new GroupByAutoBinAppliedSummary
             {
                 Alias = spec.Alias.Trim(),
+                ColumnName = column,
                 Method = spec.Method.ToString(),
-                BinCount = binCount,
-                ScopedMin = values.Length == 0 ? null : values.Min(),
-                ScopedMax = values.Length == 0 ? null : values.Max(),
-                DistinctBinKeysObserved = distinct
+                BinCount = binCountEffective,
+                RequestedBinCount = spec.BinCount,
+                ScopedMin = scopedMin,
+                ScopedMax = scopedMax,
+                DistinctBinKeysObserved = bucketValues.Count,
+                ObservedBins = bands
             });
         }
 

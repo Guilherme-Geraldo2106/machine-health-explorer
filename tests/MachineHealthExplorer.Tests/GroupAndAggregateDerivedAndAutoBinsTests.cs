@@ -228,7 +228,15 @@ public sealed class GroupAndAggregateDerivedAndAutoBinsTests
         Assert.Contains("torque_bin", result.Columns, StringComparer.OrdinalIgnoreCase);
         Assert.True(result.TotalGroups > 0);
         Assert.Single(result.GroupByAutoBinsApplied);
-        Assert.Equal("EqualWidth", result.GroupByAutoBinsApplied[0].Method, StringComparer.OrdinalIgnoreCase);
+        var applied = result.GroupByAutoBinsApplied[0];
+        Assert.Equal("EqualWidth", applied.Method, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal("Torque [Nm]", applied.ColumnName, StringComparer.Ordinal);
+        Assert.NotEmpty(applied.ObservedBins);
+        foreach (var band in applied.ObservedBins)
+        {
+            Assert.True(band.RowCount > 0);
+            Assert.True(band.UpperBound is null || band.UpperBound >= band.LowerBound);
+        }
     }
 
     [Fact]
@@ -257,7 +265,15 @@ public sealed class GroupAndAggregateDerivedAndAutoBinsTests
         });
 
         Assert.Contains("air_q", result.Columns, StringComparer.OrdinalIgnoreCase);
-        Assert.Equal("Quantile", result.GroupByAutoBinsApplied[0].Method, StringComparer.OrdinalIgnoreCase);
+        var applied = result.GroupByAutoBinsApplied[0];
+        Assert.Equal("Quantile", applied.Method, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal("Air temperature [K]", applied.ColumnName, StringComparer.Ordinal);
+        Assert.NotEmpty(applied.ObservedBins);
+        foreach (var band in applied.ObservedBins)
+        {
+            Assert.True(band.RowCount > 0);
+            Assert.True(band.UpperBound is null || band.UpperBound >= band.LowerBound);
+        }
     }
 
     [Fact]
@@ -343,6 +359,71 @@ public sealed class GroupAndAggregateDerivedAndAutoBinsTests
         Assert.Equal("array", dm.GetProperty("type").GetString());
         Assert.True(props.TryGetProperty("groupByAutoBins", out var ab));
         Assert.Equal("array", ab.GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public async Task GroupByColumns_Bins_AndAutoBins_Coexist()
+    {
+        var engine = TestDatasetFactory.CreateAnalyticsEngine(TestDatasetFactory.CreateRepository());
+
+        var result = await engine.GroupAndAggregateAsync(new GroupAggregationRequest
+        {
+            GroupByColumns = ["Type"],
+            GroupByBins =
+            [
+                new NumericGroupBinSpec
+                {
+                    ColumnName = "Torque [Nm]",
+                    Alias = "torque_bw",
+                    BinWidth = 5
+                }
+            ],
+            GroupByAutoBins =
+            [
+                new NumericGroupAutoBinSpec
+                {
+                    ColumnName = "Air temperature [K]",
+                    Alias = "air_auto",
+                    Method = GroupByAutoBinMethod.EqualWidth,
+                    BinCount = 4
+                }
+            ],
+            Aggregations =
+            [
+                new AggregationDefinition { Alias = "row_count", Function = AggregateFunction.Count }
+            ],
+            Page = 1,
+            PageSize = 50
+        });
+
+        Assert.Contains("torque_bw", result.Columns, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("air_auto", result.Columns, StringComparer.OrdinalIgnoreCase);
+        Assert.Single(result.GroupByAutoBinsApplied);
+        Assert.True(result.TotalGroups > 0);
+    }
+
+    [Fact]
+    public async Task AutoBins_AliasCollidesWithGroupByColumn_Throws()
+    {
+        var engine = TestDatasetFactory.CreateAnalyticsEngine(TestDatasetFactory.CreateRepository());
+        await Assert.ThrowsAsync<ArgumentException>(() => engine.GroupAndAggregateAsync(new GroupAggregationRequest
+        {
+            GroupByColumns = ["Type"],
+            GroupByAutoBins =
+            [
+                new NumericGroupAutoBinSpec
+                {
+                    ColumnName = "Torque [Nm]",
+                    Alias = "Type",
+                    Method = GroupByAutoBinMethod.EqualWidth,
+                    BinCount = 4
+                }
+            ],
+            Aggregations =
+            [
+                new AggregationDefinition { Alias = "row_count", Function = AggregateFunction.Count }
+            ]
+        }));
     }
 
     [Fact]

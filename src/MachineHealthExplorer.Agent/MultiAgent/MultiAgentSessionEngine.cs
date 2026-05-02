@@ -299,7 +299,7 @@ internal sealed class MultiAgentSessionEngine
                 StructuredOutput: SpecialistStructuredOutputParser.FromToolFallback(
                     step.SpecialistKind,
                     Array.Empty<AgentToolExecutionRecord>(),
-                    digestMaxChars: Math.Clamp(_options.MemoryEvidenceDigestMaxChars, 96, 1200)),
+                    AgentToolEvidenceCompressor.ComputeMaxToolEvidenceChars(_options, estimatedPromptTokens: 1024)),
                 SpecialistScratchTranscript: Array.Empty<AgentConversationMessage>());
         }
     }

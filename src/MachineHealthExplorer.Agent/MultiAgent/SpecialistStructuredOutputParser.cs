@@ -1,4 +1,5 @@
 using MachineHealthExplorer.Agent.Models;
+using MachineHealthExplorer.Agent.Services;
 using System.Text.Json;
 
 namespace MachineHealthExplorer.Agent.MultiAgent;
@@ -48,20 +49,34 @@ internal static class SpecialistStructuredOutputParser
     public static AgentStructuredSpecialistOutput FromToolFallback(
         AgentSpecialistKind kind,
         IReadOnlyList<AgentToolExecutionRecord> toolExecutions,
-        int digestMaxChars)
+        int toolEvidenceMaxChars)
     {
         var evidences = new List<AgentEvidence>();
+        var safeBudget = Math.Clamp(toolEvidenceMaxChars, 512, 200_000);
+        var errorBudget = Math.Max(safeBudget, 8192);
+
         foreach (var execution in toolExecutions)
         {
             if (execution.IsError)
             {
-                evidences.Add(new AgentEvidence(execution.ToolName, $"error:{execution.ResultJson}", null));
+                var errJson = execution.ResultJson ?? "{}";
+                var errFragment = errJson.Length <= errorBudget
+                    ? errJson
+                    : AgentToolEvidenceCompressor.CompactToolErrorJsonForEnvelope(errJson, errorBudget);
+                evidences.Add(new AgentEvidence(execution.ToolName, "tool_error", errFragment));
                 continue;
             }
 
-            var body = execution.ResultJson ?? string.Empty;
-            var fragment = body.Length <= digestMaxChars ? body : string.Concat(body.AsSpan(0, digestMaxChars), "…");
-            evidences.Add(new AgentEvidence(execution.ToolName, $"{execution.ToolName} output captured.", fragment));
+            var fragment = AgentToolEvidenceCompressor.BuildToolMessageContent(
+                execution.ToolName,
+                execution.ResultJson ?? "{}",
+                safeBudget,
+                execution.ArgumentsJson);
+
+            evidences.Add(new AgentEvidence(
+                execution.ToolName,
+                $"{execution.ToolName}: tool envelope (generic).",
+                fragment));
         }
 
         return new AgentStructuredSpecialistOutput(
@@ -73,7 +88,7 @@ internal static class SpecialistStructuredOutputParser
             ObjectiveObservations: Array.Empty<string>(),
             HypothesesOrCaveats: Array.Empty<string>(),
             ReportSections: Array.Empty<string>(),
-            AnalystNotes: "Structured synthesis unavailable; using tool-output fallbacks.");
+            AnalystNotes: "Structured synthesis unavailable; using compact tool-output envelopes (model-visible).");
     }
 
     private static IReadOnlyList<AgentEvidence> ReadEvidences(JsonElement root)

@@ -219,6 +219,7 @@ Rules:
 - Do not invent tool names; every entry in tools[] must match a name from the provided catalog list.
 - If no new tool call is needed for the next step, return "need_tools": false (tools may be []).
 - If new dataset-backed calls are needed, return "need_tools": true with the smallest sufficient tools[] set (order is not important).
+- When the primary question implies quantitative comparison, ranking, combinations, proportions, or association strength, bias need_tools=true toward including group_and_aggregate (still without choosing any columns yourself).
 - Keep reason under 120 characters; factual routing notes only.
 {recovery}
 """;

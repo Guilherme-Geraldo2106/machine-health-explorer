@@ -450,15 +450,28 @@ public sealed record DerivedMetricDefinition
     public string Expression { get; init; } = string.Empty;
 }
 
+/// <summary>Observed numeric band for one automatic-bin key (metadata only; no importance semantics).</summary>
+public sealed record GroupByAutoBinObservedBand
+{
+    public double LowerBound { get; init; }
+    public double? UpperBound { get; init; }
+    public int RowCount { get; init; }
+}
+
 /// <summary>Neutral summary of an applied auto-bin dimension (for model-facing JSON).</summary>
 public sealed record GroupByAutoBinAppliedSummary
 {
     public string Alias { get; init; } = string.Empty;
+    public string ColumnName { get; init; } = string.Empty;
     public string Method { get; init; } = string.Empty;
+    /// <summary>Effective bin count used after defaults/validation.</summary>
     public int BinCount { get; init; }
+    /// <summary>Bin count from the request when supplied; null when omitted (defaults applied).</summary>
+    public int? RequestedBinCount { get; init; }
     public double? ScopedMin { get; init; }
     public double? ScopedMax { get; init; }
     public int DistinctBinKeysObserved { get; init; }
+    public IReadOnlyList<GroupByAutoBinObservedBand> ObservedBins { get; init; } = Array.Empty<GroupByAutoBinObservedBand>();
 }
 
 public sealed record GroupAggregationRequest

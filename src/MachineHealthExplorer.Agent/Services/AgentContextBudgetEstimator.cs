@@ -161,7 +161,7 @@ internal static class AgentContextBudgetEstimator
         var reasoningReserve = Math.Max(0, options.MultiAgent.ToolTurnReasoningReserveTokens);
         if (lastUsage?.ReasoningTokens is { } reasoning && reasoning > 0)
         {
-            reasoningReserve = Math.Clamp(reasoningReserve + reasoning, 0, 2048);
+            reasoningReserve = Math.Clamp(reasoningReserve + reasoning, 0, 8192);
         }
 
         var host = GetEffectiveHostContextTokens(options);
@@ -192,7 +192,7 @@ internal static class AgentContextBudgetEstimator
         }
 
         var margin = Math.Max(96, multi.ToolTurnReasoningReserveTokens);
-        var fromUsage = observed + margin;
+        var fromUsage = observed + margin + Math.Max(0, reasoning);
         return Math.Min(options.MaxOutputTokens, Math.Max(baseCap, fromUsage));
     }
 
@@ -207,7 +207,7 @@ internal static class AgentContextBudgetEstimator
         var reasoningReserve = Math.Max(0, options.MultiAgent.ToolTurnReasoningReserveTokens);
         if (lastUsage?.ReasoningTokens is { } reasoning && reasoning > 0)
         {
-            reasoningReserve = Math.Clamp(reasoningReserve + reasoning, 0, 2048);
+            reasoningReserve = Math.Clamp(reasoningReserve + reasoning, 0, 8192);
         }
 
         var host = GetEffectiveHostContextTokens(options);

@@ -7,6 +7,35 @@ namespace MachineHealthExplorer.Agent.Services;
 
 internal static class AgentToolEvidenceCompressor
 {
+    /// <summary>
+    /// Best-effort shrink of a tool error JSON for transcripts while keeping parseable JSON when possible.
+    /// </summary>
+    public static string CompactToolErrorJsonForEnvelope(string json, int maxChars)
+    {
+        var safe = Math.Clamp(maxChars, 256, 200_000);
+        var text = string.IsNullOrWhiteSpace(json) ? "{}" : json.Trim();
+        if (text.Length <= safe)
+        {
+            return text;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            var slim = doc.RootElement.ToString();
+            if (slim.Length <= safe)
+            {
+                return slim;
+            }
+        }
+        catch (JsonException)
+        {
+            // ignore
+        }
+
+        return string.Concat(text.AsSpan(0, safe), "…");
+    }
+
     private static readonly HashSet<string> StructuralTabularTools = new(StringComparer.OrdinalIgnoreCase)
     {
         "group_and_aggregate",

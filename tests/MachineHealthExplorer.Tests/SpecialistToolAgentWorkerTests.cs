@@ -334,7 +334,7 @@ public sealed class SpecialistToolAgentWorkerTests
 
         _ = await worker.ExecuteAsync(request, CancellationToken.None);
 
-        var afterTruncation = inner.Requests.FirstOrDefault(r => r.EnableTools && r.Messages.Any(m => (m.Content ?? string.Empty).Contains("truncated", StringComparison.OrdinalIgnoreCase)));
+        var afterTruncation = inner.Requests.FirstOrDefault(r => r.EnableTools && r.Messages.Any(m => (m.Content ?? string.Empty).Contains("finish_reason=length", StringComparison.OrdinalIgnoreCase)));
         Assert.NotNull(afterTruncation);
         var serializedAfterTruncation = JsonSerializer.Serialize(afterTruncation.Messages);
         Assert.DoesNotContain(reasoningMarker, serializedAfterTruncation, StringComparison.Ordinal);
@@ -1217,5 +1217,19 @@ public sealed class SpecialistToolAgentWorkerTests
                     ResultJson = """{"rows":[{"values":{"bin":1}}]}"""
                 });
         }
+    }
+
+    [Fact]
+    public void BuildLengthTruncationRecoveryUserContent_IncludesContractAndExposedTools()
+    {
+        var msg = SpecialistToolAgentWorker.BuildLengthTruncationRecoveryUserContent(
+            Array.Empty<AgentToolExecutionRecord>(),
+            ["get_schema", "group_and_aggregate"],
+            useFullToolSchemas: true);
+
+        Assert.Contains("Length recovery", msg, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("groupByAutoBins", msg, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("get_schema", msg, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("tool_calls", msg, StringComparison.OrdinalIgnoreCase);
     }
 }
