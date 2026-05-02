@@ -193,6 +193,10 @@ public sealed class SpecialistToolAgentWorkerTests
             result.ToolExecutions,
             e => e.ToolName.Equals("group_and_aggregate", StringComparison.OrdinalIgnoreCase));
 
+        Assert.False(
+            result.FailureMessage?.Contains("repeatedly truncated", StringComparison.OrdinalIgnoreCase) ?? false,
+            result.FailureMessage);
+
         var toolRequests = chat.Requests.Where(r => r.EnableTools && r.Tools.Count > 0).ToArray();
         Assert.True(toolRequests.Length >= 3);
         Assert.Contains(toolRequests, r => r.MaxOutputTokens > 600);
@@ -917,6 +921,109 @@ public sealed class SpecialistToolAgentWorkerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_PlannerNarrowsSurface_ModelCallsOtherAllowlistedTool_OutOfSurfaceErrorIsVisible()
+    {
+        var options = new AgentOptions
+        {
+            Model = "m",
+            HostContextTokens = 16_000,
+            ContextSlotTokens = 16_000,
+            EnableStructuredJsonOutputs = false,
+            MultiAgent = new MultiAgentOrchestrationOptions
+            {
+                EnableSpecialistToolSelectionPlanning = true,
+                SpecialistMaxToolIterations = 8,
+                SpecialistRecoveryPreferToolChoiceRequired = false,
+                SpecialistToolSelectionPlannerMaxRecoveryAttempts = 1
+            }
+        };
+
+        var runtime = new SearchSchemaAggregateRuntime();
+        var synthesisJson =
+            """{"relevantColumns":[],"ambiguities":[],"evidences":[{"sourceTool":"group_and_aggregate","summary":"ok","supportingJsonFragment":null}],"keyMetrics":{},"objectiveObservations":[],"hypothesesOrCaveats":[],"reportSections":[],"analystNotes":"ok"}""";
+
+        var chat = new QueuingChatClient(
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = """{"need_tools":true,"tools":["get_schema"],"reason":"schema"}""",
+                FinishReason = "stop"
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls = [new AgentToolCall { Id = "s", Name = "get_schema", ArgumentsJson = "{}" }]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = """{"need_tools":true,"tools":["group_and_aggregate"],"reason":"aggregate"}""",
+                FinishReason = "stop"
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "w", Name = "search_columns", ArgumentsJson = """{"keyword":"x"}""" }
+                ]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = """{"need_tools":true,"tools":["group_and_aggregate"],"reason":"retry"}""",
+                FinishReason = "stop"
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                FinishReason = "tool_calls",
+                ToolCalls =
+                [
+                    new AgentToolCall { Id = "ok", Name = "group_and_aggregate", ArgumentsJson = """{"aggregations":[{"alias":"n","function":"Count"}]}""" }
+                ]
+            },
+            new AgentModelResponse
+            {
+                Model = "m",
+                Content = """{"need_tools":false,"tools":[],"reason":"done"}""",
+                FinishReason = "stop"
+            },
+            new AgentModelResponse { Model = "m", Content = synthesisJson, FinishReason = "stop" });
+
+        var sessionLog = new CapturingChatSessionLogger();
+        var worker = new SpecialistToolAgentWorker(options, runtime, chat, NullLogger.Instance, sessionLog);
+        var request = new AgentTaskRequest(
+            AgentSpecialistKind.QueryAnalysis,
+            "Question",
+            "dispatch",
+            new AgentConversationMemory(),
+            Array.Empty<AgentConversationMessage>(),
+            runtime.GetTools(),
+            "m",
+            "sys",
+            ExpectsDatasetQueryEvidence: true);
+
+        var result = await worker.ExecuteAsync(request, CancellationToken.None);
+
+        Assert.True(result.Success);
+        var allMessageText = string.Join(
+            '\n',
+            chat.Requests.SelectMany(r => r.Messages).Select(m => m.Content ?? string.Empty));
+        Assert.Contains("tool_not_on_exposed_surface", allMessageText, StringComparison.Ordinal);
+        Assert.True(
+            result.ToolExecutions.Any(e => e.IsError
+                && (e.ResultJson ?? string.Empty).Contains("tool_not_on_exposed_surface", StringComparison.Ordinal)),
+            "Expected a synthetic tool_error execution for the out-of-surface call.");
+        Assert.Contains(
+            sessionLog.Events,
+            e => e.EventType.Equals("agent.tool_call.rejected", StringComparison.Ordinal)
+                 && (e.Error ?? string.Empty).Contains("search_columns", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void OutOfSurfaceToolResultJson_IncludesValidationPayload()
     {
         var exposed = new List<AgentToolDefinition>
@@ -939,12 +1046,15 @@ public sealed class SpecialistToolAgentWorkerTests
 
         var json = SpecialistToolSurfaceValidation.BuildOutOfSurfaceToolResultJson(
             "get_schema",
+            new[] { "get_schema", "group_and_aggregate" },
             exposed,
             scoped,
             useFullToolSchemas: true);
 
         Assert.Contains("tool_not_on_exposed_surface", json, StringComparison.Ordinal);
         Assert.Contains("group_and_aggregate", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("specialist_allowed_tools", json, StringComparison.Ordinal);
+        Assert.Contains("schemas_digest", json, StringComparison.Ordinal);
     }
 
     private sealed class SearchSchemaAggregateRuntime : IAgentToolRuntime

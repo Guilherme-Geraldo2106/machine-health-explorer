@@ -356,10 +356,14 @@ public sealed class LmStudioChatClient : IAgentChatClient, IDisposable
                 var mapped = AgentToolInvocationCanonicalizer.TryResolveRegisteredName(rawName, registeredToolNames);
                 if (mapped is null)
                 {
-                    continue;
+                    // Preserve the raw API name so orchestration can surface a model-visible rejection
+                    // (e.g. tool allowed for specialist but not exposed this turn) instead of dropping the call.
+                    resolvedName = rawName.Trim();
                 }
-
-                resolvedName = mapped;
+                else
+                {
+                    resolvedName = mapped;
+                }
             }
             else
             {

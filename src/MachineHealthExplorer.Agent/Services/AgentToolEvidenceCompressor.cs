@@ -44,7 +44,11 @@ internal static class AgentToolEvidenceCompressor
         return options.MaxToolEvidenceContentChars;
     }
 
-    public static string BuildToolMessageContent(string toolName, string resultJson, int maxChars)
+    public static string BuildToolMessageContent(
+        string toolName,
+        string resultJson,
+        int maxChars,
+        string? toolRequestArgumentsJson = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(toolName);
 
@@ -72,16 +76,85 @@ internal static class AgentToolEvidenceCompressor
             }
         }
 
-        var envelope = new
-        {
-            schema = "mhe_tool_evidence_v1",
-            tool = toolName,
-            preview = body,
-            original_length = normalized.Length
-        };
+        var aggregationSummary = TrySummarizeGroupAndAggregateAggregationSemantics(toolName, toolRequestArgumentsJson);
+        object envelope = aggregationSummary.Count > 0
+            ? new
+            {
+                schema = "mhe_tool_evidence_v1",
+                tool = toolName,
+                preview = body,
+                original_length = normalized.Length,
+                aggregationRequestSummary = aggregationSummary
+            }
+            : new
+            {
+                schema = "mhe_tool_evidence_v1",
+                tool = toolName,
+                preview = body,
+                original_length = normalized.Length
+            };
 
         return JsonSerializer.Serialize(envelope, AgentJsonSerializer.Options);
     }
+
+    /// <summary>
+    /// Generic hints from the tool request (not result aliases): whether each aggregation used an optional per-aggregation filter.
+    /// Helps downstream models avoid treating unfiltered Count as a conditional/event tally based only on an output alias.
+    /// </summary>
+    private static IReadOnlyList<AggregationRequestSummaryEntry> TrySummarizeGroupAndAggregateAggregationSemantics(
+        string toolName,
+        string? toolRequestArgumentsJson)
+    {
+        if (!string.Equals(toolName, "group_and_aggregate", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(toolRequestArgumentsJson))
+        {
+            return Array.Empty<AggregationRequestSummaryEntry>();
+        }
+
+        try
+        {
+            var node = JsonNode.Parse(toolRequestArgumentsJson);
+            if (node is not JsonObject root)
+            {
+                return Array.Empty<AggregationRequestSummaryEntry>();
+            }
+
+            var aggregations = root["aggregations"]?.AsArray();
+            if (aggregations is null || aggregations.Count == 0)
+            {
+                return Array.Empty<AggregationRequestSummaryEntry>();
+            }
+
+            var list = new List<AggregationRequestSummaryEntry>();
+            foreach (var item in aggregations)
+            {
+                if (item is not JsonObject agg)
+                {
+                    continue;
+                }
+
+                var alias = agg["alias"]?.GetValue<string>() ?? string.Empty;
+                var fn = agg["function"]?.GetValue<string>() ?? string.Empty;
+                var hasPerAggFilter = agg["filter"] is not null;
+                var row = new AggregationRequestSummaryEntry(alias, fn, hasPerAggFilter);
+                if (!string.IsNullOrWhiteSpace(alias) || !string.IsNullOrWhiteSpace(fn))
+                {
+                    list.Add(row);
+                }
+            }
+
+            return list;
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<AggregationRequestSummaryEntry>();
+        }
+    }
+
+    private sealed record AggregationRequestSummaryEntry(
+        string Alias,
+        string Function,
+        bool PerAggregationFilterPresent);
 
     public static bool CompactToolMessagesInConversation(List<AgentConversationMessage> messages, int newPreviewMaxChars)
     {
@@ -141,6 +214,7 @@ internal static class AgentToolEvidenceCompressor
 
             obj["preview"] = nextPreview;
             obj["original_length"] = preview.Length;
+            // Preserve optional request semantics (e.g. aggregation_request_summary) untouched.
             return obj.ToJsonString(AgentJsonSerializer.Options);
         }
         catch (JsonException)

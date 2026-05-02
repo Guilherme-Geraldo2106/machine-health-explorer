@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MachineHealthExplorer.Agent.Models;
 using MachineHealthExplorer.Agent.Services;
 
@@ -17,5 +18,25 @@ public sealed class AgentToolEvidenceCompressorSchemaTests
         Assert.Contains("Air temperature [K]", envelope, StringComparison.Ordinal);
         Assert.Contains("Process temperature [K]", envelope, StringComparison.Ordinal);
         Assert.Contains("Machine failure", envelope, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildToolMessageContent_GroupAndAggregate_IncludesAggregationRequestSummaryFromArguments()
+    {
+        var args =
+            """{"aggregations":[{"alias":"events_alias","function":"Count"},{"alias":"rows_alias","function":"Count","filter":{"columnName":"flag","operator":"Equals","value":true}}],"pageSize":50}""";
+        var envelopeJson = AgentToolEvidenceCompressor.BuildToolMessageContent(
+            "group_and_aggregate",
+            """{"rows":[]}""",
+            maxChars: 2000,
+            args);
+
+        using var doc = JsonDocument.Parse(envelopeJson);
+        var root = doc.RootElement;
+        Assert.Equal("mhe_tool_evidence_v1", root.GetProperty("schema").GetString());
+        var summary = root.GetProperty("aggregationRequestSummary");
+        Assert.Equal(2, summary.GetArrayLength());
+        Assert.False(summary[0].GetProperty("perAggregationFilterPresent").GetBoolean());
+        Assert.True(summary[1].GetProperty("perAggregationFilterPresent").GetBoolean());
     }
 }

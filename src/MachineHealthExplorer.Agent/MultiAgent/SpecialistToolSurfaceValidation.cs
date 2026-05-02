@@ -8,12 +8,18 @@ internal static class SpecialistToolSurfaceValidation
 {
     public static string BuildOutOfSurfaceToolResultJson(
         string requestedToolName,
-        IReadOnlyList<AgentToolDefinition> exposedTools,
+        IReadOnlyList<string> specialistAllowedToolNames,
+        IReadOnlyList<AgentToolDefinition> exposedToolsThisTurn,
         IReadOnlyList<AgentToolDefinition> scopedCatalogForSchemas,
         bool useFullToolSchemas)
     {
-        var exposed = exposedTools
+        var exposed = exposedToolsThisTurn
             .Select(t => t.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var allowed = specialistAllowedToolNames
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -22,6 +28,7 @@ internal static class SpecialistToolSurfaceValidation
             ? MultiAgentPromptBuilder.BuildGroupAndAggregateCompactContractHint()
             : AgentPromptBudgetGuard.CompactPlain(MultiAgentPromptBuilder.BuildMinimalToolParametersContractHint(), 900);
 
+        var schemaDigest = BuildCompactToolSchemasDigest(scopedCatalogForSchemas);
         var schemaHint = FindParametersSchema(requestedToolName, scopedCatalogForSchemas);
         return AgentJsonSerializer.Serialize(new
         {
@@ -30,11 +37,13 @@ internal static class SpecialistToolSurfaceValidation
                 "Requested tool was not part of exposed_tools_this_turn for this round; pick one exposed tool and retry with valid arguments.",
             error_kind = "tool_not_on_exposed_surface_this_turn",
             requested_tool = requestedToolName,
+            specialist_allowed_tools = allowed,
             exposed_tools_this_turn = exposed,
             compact_contract = compactContract,
+            schemas_digest = schemaDigest,
             requested_tool_parameters_schema_hint = string.IsNullOrWhiteSpace(schemaHint) ? null : schemaHint,
             instruction =
-                "This tool name was not among exposed_tools_this_turn for this model round. Pick one exposed tool only, match arguments to compact_contract (and full schemas when present), then emit a valid tool_calls entry."
+                "Use only a tool name from exposed_tools_this_turn for this round (must also appear in specialist_allowed_tools). Match arguments to compact_contract / schemas_digest, then emit a valid tool_calls entry."
         });
     }
 

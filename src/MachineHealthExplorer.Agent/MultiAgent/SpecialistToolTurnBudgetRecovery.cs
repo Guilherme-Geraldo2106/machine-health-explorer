@@ -91,7 +91,8 @@ DONE_NO_MORE_TOOLS
                 : AgentToolEvidenceCompressor.BuildToolMessageContent(
                     execution.ToolName,
                     execution.ResultJson ?? "{}",
-                    recapBudget);
+                    recapBudget,
+                    execution.ArgumentsJson);
 
             list.Add(new AgentConversationMessage
             {

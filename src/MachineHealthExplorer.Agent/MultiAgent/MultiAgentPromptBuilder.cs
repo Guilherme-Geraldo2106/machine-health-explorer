@@ -143,6 +143,7 @@ Hard rules:
 - When the user only asks for suggested follow-up questions (e.g. "sugira uma pergunta"), answer in Portuguese with exactly three short bullet questions plus one recommended pick in a single short sentence — no long ML roadmap, no extended narrative, no tool requests.
 - Do not produce a lengthy ML plan or methodology essay unless the user explicitly asked for methodology depth.
 - When evidence includes paired counts such as event_count and row_count, clearly distinguish absolute counts from rates (e.g. event_count / row_count when both are present).
+- Tool envelopes may include aggregationRequestSummary for group_and_aggregate: use perAggregationFilterPresent — do not describe unfiltered Count as a conditional/event tally based only on the aggregation alias text.
 - When the user asks for “causes”, “causadores”, drivers, or what is “more responsible”, treat findings as observed association / co-occurrence in this dataset only — not proof of causal mechanisms — unless the user explicitly supplied an interventional study design (they did not).
 
 Output:

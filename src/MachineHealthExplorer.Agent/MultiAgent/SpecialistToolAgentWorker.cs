@@ -97,8 +97,13 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
 
         var safeFloor = Math.Clamp(_options.MultiAgent.ToolTurnSafeMinMaxOutputTokens, 96, 8192);
         var maxIterations = Math.Max(1, _options.MultiAgent.SpecialistMaxToolIterations);
-        for (var iteration = 0; iteration < maxIterations; iteration++)
+        var lengthRecoveryBonusSlots = Math.Max(0, _options.MultiAgent.SpecialistLengthRecoveryBonusIterationSlots);
+        var lengthRecoveryBonusGranted = 0;
+        for (var iteration = 0;
+             iteration < maxIterations + lengthRecoveryBonusGranted && iteration < maxIterations + lengthRecoveryBonusSlots;
+             iteration++)
         {
+            var lengthRecoveryPlannerRound = plannerSuppressedForLengthRecovery;
             var missingEvidenceKinds = SpecialistDatasetEvidencePolicy.GetMissingRequiredEvidenceKinds(request, executedTools);
             var explicitEvidencePlan = request.RequiredEvidenceKinds is { Count: > 0 };
             var narrowedCatalog = explicitEvidencePlan
@@ -191,7 +196,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                             conversation,
                             executedTools,
                             iteration,
-                            maxIterations,
+                            maxIterations + lengthRecoveryBonusGranted,
                             cancellationToken)
                         .ConfigureAwait(false);
                     if (earlyReturn is not null)
@@ -570,6 +575,13 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                 plannerSuppressedForLengthRecovery = false;
                 recoveryToolSurface = null;
                 toolTurnLengthRecoveriesAttempted = 0;
+                encounteredTruncationWithoutTools = false;
+                if (lengthRecoveryPlannerRound
+                    && lengthRecoveryBonusGranted < lengthRecoveryBonusSlots)
+                {
+                    lengthRecoveryBonusGranted++;
+                }
+
                 conversation.Add(new AgentConversationMessage
                 {
                     Role = AgentConversationRole.Assistant,
@@ -590,6 +602,12 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                             toolCall.Name,
                             string.Join(", ", toolsExposedForModelTurn.Select(t => t.Name)));
 
+                        var rejectionPayload = SpecialistToolSurfaceValidation.BuildOutOfSurfaceToolResultJson(
+                            toolCall.Name,
+                            allowedNames,
+                            toolsExposedForModelTurn,
+                            scopedTools,
+                            request.UseFullToolSchemas);
                         _chatSessionLogger.Append(new ChatSessionLogEvent(
                             default,
                             string.Empty,
@@ -597,22 +615,18 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                             "internal",
                             model,
                             response.FinishReason,
+                            SummarizeToolCallsForLog(new[] { toolCall }),
                             null,
                             null,
                             null,
-                            null,
-                            $"requested={toolCall.Name}; exposed=[{string.Join(',', toolsExposedForModelTurn.Select(t => t.Name))}]"));
+                            rejectionPayload));
 
                         execution = new AgentToolExecutionRecord
                         {
                             ToolName = toolCall.Name,
                             ArgumentsJson = toolCall.ArgumentsJson ?? "{}",
                             IsError = true,
-                            ResultJson = SpecialistToolSurfaceValidation.BuildOutOfSurfaceToolResultJson(
-                                toolCall.Name,
-                                toolsExposedForModelTurn,
-                                scopedTools,
-                                request.UseFullToolSchemas)
+                            ResultJson = rejectionPayload
                         };
                     }
                     else
@@ -639,7 +653,8 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                         : AgentToolEvidenceCompressor.BuildToolMessageContent(
                             toolCall.Name,
                             execution.ResultJson ?? "{}",
-                            evidenceBudget);
+                            evidenceBudget,
+                            toolCall.ArgumentsJson);
                     _logger.LogInformation(
                         "Specialist {Specialist} executed tool {Tool} is_error={IsError} args_len={ArgsLen} result_len={ResLen} preview_len={PrevLen} elapsed_ms={Ms}",
                         kind,
@@ -691,7 +706,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
                     && toolTurnLengthRecoveriesAttempted >= maxLengthRecoveries
                     && ComputeToolCallMaxOutputTokens(estimatedPrompt, request, lastToolTurnUsage) > toolTurnMaxOut + 32
                     && toolsExposedForModelTurn.Count > 0
-                    && iteration + 1 < maxIterations;
+                    && iteration + 1 < maxIterations + lengthRecoveryBonusGranted;
                 if (toolTurnLengthRecoveriesAttempted < maxLengthRecoveries
                     || recoveryWaveAfterCeiling)
                 {
@@ -781,7 +796,7 @@ internal sealed class SpecialistToolAgentWorker : IAgentWorker
 
             if (synthesisRetryToolLoop || structuredMaybe is null)
             {
-                if (iteration + 1 >= maxIterations)
+                if (iteration + 1 >= maxIterations + lengthRecoveryBonusGranted)
                 {
                     var pseudoFallback = SpecialistStructuredOutputParser.FromToolFallback(
                         kind,
@@ -1015,7 +1030,7 @@ If you choose DONE_NO_MORE_TOOLS, add a single technical justification line expl
         List<AgentConversationMessage> conversation,
         List<AgentToolExecutionRecord> executedTools,
         int iteration,
-        int maxIterations,
+        int effectiveIterationLimit,
         CancellationToken cancellationToken)
     {
         var insufficientDatasetEvidenceForSynthesis =
@@ -1033,7 +1048,7 @@ If you choose DONE_NO_MORE_TOOLS, add a single technical justification line expl
 
         if (synthesisRetryToolLoop || structuredMaybe is null)
         {
-            if (iteration + 1 >= maxIterations)
+            if (iteration + 1 >= effectiveIterationLimit)
             {
                 var pseudoFallback = SpecialistStructuredOutputParser.FromToolFallback(
                     kind,
@@ -1286,6 +1301,7 @@ You must return ONLY JSON (no markdown fences) with this shape:
 
 Rules:
 - keyMetrics must be an object whose values are numbers only (omit unknowns).
+- For group_and_aggregate, only treat a Count as a conditional/subset tally when the tool request (see aggregationRequestSummary in tool envelopes) shows a per-aggregation filter; unfiltered Count is a group row tally even if the alias suggests events.
 - Do not invent dataset values; ground summaries in the transcript tool outputs.
 - Keep lists short and high-signal.
 - Keep each supportingJsonFragment under 600 characters when possible.

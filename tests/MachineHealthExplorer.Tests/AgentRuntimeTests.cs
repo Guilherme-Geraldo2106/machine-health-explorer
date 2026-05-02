@@ -973,6 +973,68 @@ public sealed class AgentRuntimeTests
     }
 
     [Fact]
+    public async Task LmStudioChatClient_PreservesToolCallName_WhenNotInRequestToolSurface()
+    {
+        const string responseJson = """
+        {
+          "id": "chatcmpl-surface",
+          "object": "chat.completion",
+          "created": 1776549825,
+          "model": "m",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "1",
+                    "type": "function",
+                    "function": {
+                      "name": "search_columns",
+                      "arguments": "{\"keyword\":\"x\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ]
+        }
+        """;
+
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(responseJson))
+        {
+            BaseAddress = new Uri("http://127.0.0.1:1234/v1/")
+        };
+
+        using var chatClient = new LmStudioChatClient(
+            new AgentOptions { BaseUrl = "http://127.0.0.1:1234/v1", Model = "m" },
+            httpClient);
+
+        var response = await chatClient.CompleteAsync(new AgentModelRequest
+        {
+            Model = "m",
+            SystemPrompt = "sys",
+            Messages = [new AgentConversationMessage { Role = AgentConversationRole.User, Content = "q" }],
+            Tools =
+            [
+                new AgentToolDefinition
+                {
+                    Name = "group_and_aggregate",
+                    Description = "Agg."
+                }
+            ],
+            EnableTools = true
+        });
+
+        var call = Assert.Single(response.ToolCalls);
+        Assert.Equal("search_columns", call.Name, StringComparer.Ordinal);
+        Assert.Equal("""{"keyword":"x"}""", call.ArgumentsJson);
+    }
+
+    [Fact]
     public void VisibleNormalizer_PseudoOnlyAssistantSurface_IsNotUserVisible()
     {
         Assert.False(AgentVisibleResponseNormalizer.IsUserVisibleAssistantText(

@@ -86,6 +86,11 @@ public sealed record MultiAgentOrchestrationOptions
     /// </summary>
     public int SpecialistToolTurnLengthRecoveryMaxAttempts { get; init; } = 4;
     /// <summary>
+    /// After a length-truncation recovery turn successfully executes at least one tool call, allow up to this many extra specialist loop iterations (orchestration-only; no domain logic).
+    /// Gives room for synthesis after recovery without immediately exhausting the base iteration budget.
+    /// </summary>
+    public int SpecialistLengthRecoveryBonusIterationSlots { get; init; } = 1;
+    /// <summary>
     /// Extra user turns asking for dataset query evidence when only structural tools ran but the dispatch expects metrics.
     /// </summary>
     public int SpecialistMaxStructuralEvidenceRecoveryUserTurns { get; init; } = 2;
