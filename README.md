@@ -1,6 +1,6 @@
 # MachineHealthExplorer
 
-MachineHealthExplorer is a local analytical agent foundation for exploring predictive maintenance data as if the CSV were a lightweight in-memory analytical database. The current implementation focuses on clean architecture, schema inference, flexible querying, aggregation, profiling, reporting, reusable machine-health analytics services, and a tool-facing layer that is ready to be exposed to a future local AI agent.
+MachineHealthExplorer is a local analytical agent foundation for exploring predictive maintenance data as if the CSV were a lightweight  in-memory analytical database. The current implementation focuses on clean architecture, schema inference, flexible querying, aggregation, profiling, reporting, reusable machine-health analytics services, and a tool-facing layer that is ready to be exposed to a future local AI agent.
 
 The initial dataset is the public AI4I 2020 predictive maintenance CSV, stored in `data/ai4i2020.csv`. The code inspects the CSV at runtime instead of hardcoding the schema, so it can tolerate modest schema drift while still using the real AI4I structure to provide useful task-oriented analytics.
 
