@@ -1,0 +1,15 @@
+metadata:
+  name: MyDatabase
+  version: 1.0.0
+  database: postgresql
+  author: Guilherme Geraldo
+  managerVersion: 16
+  msVersion: 1.0
+tables:
+- name: Table_1
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+...

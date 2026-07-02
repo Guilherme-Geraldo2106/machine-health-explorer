@@ -7,7 +7,7 @@ The initial dataset is the public AI4I 2020 predictive maintenance CSV, stored i
 ## Goals
 
 - Build a production-style .NET 10 solution with clear project boundaries.
-- Treat the CSV like a mini analytical engine with flexible filters, sorting, paging, grouping, and aggregation.
+- Treat the CSV like a mini analytical engine with flexible filters, sorasdadting, paging, grouping, and aggregation.
 - Provide reusable query-building abstractions so row queries, grouped analyses, and subset comparisons are easy to compose consistently.
 - Infer schema metadata from the real dataset, including type hints, nullability, distinct counts, sample values, numeric summaries, and categorical top values.
 - Keep the tool layer thin so future LLM or MAF integration can call reusable analytics services without duplicating business logic.
@@ -18,15 +18,15 @@ The initial dataset is the public AI4I 2020 predictive maintenance CSV, stored i
 - `src/MachineHealthExplorer.Host`
   Console entry point with configuration, dependency wiring, startup demo flow, and a simple interactive CLI loop.
 - `src/MachineHealthExplorer.Domain`
-  Shared contracts: dataset rows, schema models, query/filter/sort/group requests, aggregation results, summaries, comparisons, and reports.
+  Shared contracts: dataset rows, schema modesadasdls, query/filter/sort/group requests, aggregation results, summaries, comparisons, and reports.
 - `src/MachineHealthExplorer.Data`
   CSV loading, path resolution, in-memory repository, schema inference, query execution, reusable query helpers, statistics, reporting support, and machine-health-specific analytics services built on the generic engine.
 - `src/MachineHealthExplorer.Tools`
   Thin tool-facing service layer plus a centralized tool catalog for future agent/tool registration.
 - `src/MachineHealthExplorer.Agent`
-  Placeholder orchestration boundary for future Microsoft Agent Framework integration, now backed by the shared tool catalog instead of a separate hardcoded descriptor list.
+  Placeholder orchestration boundary for future Microsoft Agent Framework integration, now backed by the shared tool catalog instead of a separate harsadaddcoded descriptor list.
 - `tests/MachineHealthExplorer.Tests`
-  Unit tests covering dataset load, schema inference, filtering, grouping, comparison, distinct values, and tool-layer methods.
+  Unit tests covering dataset load, schema inference, filtering, grouping, comparison, distinct values, and tool-layer methods.asdasd
 
 ## Dataset Notes
 
@@ -48,12 +48,12 @@ The current AI4I CSV contains 10,000 rows and these observed columns:
 - `RNF`
 
 The implementation does not hardcode those columns for the core data engine. Instead, it infers the schema at load time and only uses lightweight heuristics in the tool layer to recognize failure-related columns when building task-oriented summaries.
-
+adasd
 ## Current Capabilities
 
 - Load the CSV into an in-memory repository.
 - Infer column names, data types, nullability, sample values, distinct counts, and cardinality hints.
-- Profile numeric columns with sum, average, min, max, median, and standard deviation.
+- Profile numeric columns with sum, average, min, max, median, and standadard deviation.
 - Profile categorical columns with top values and counts.
 - Query rows with:
   - reusable `DatasetFilters`, `DatasetSorts`, and `DatasetAggregations` builders
@@ -63,7 +63,7 @@ The implementation does not hardcode those columns for the core data engine. Ins
   - column projection
   - sorting
   - paging
-- Retrieve distinct values for any column.
+- Retrieve distinct values for any column.adsad
 - Group rows and aggregate with:
   - `count`
   - `count distinct`

@@ -1,0 +1,14 @@
+layout:
+  diagram:
+    positions:
+      Table_1:
+        x: 50
+        y: 50
+    displayMode: physical
+    edgeType: smoothstep
+    viewport:
+      x: 62
+      y: 83
+      zoom: 1
+  perspectives: {}
+  activePerspective: 
