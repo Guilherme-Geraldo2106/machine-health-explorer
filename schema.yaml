@@ -8,7 +8,7 @@ metadata:
 tables:
 - name: Table_1
   columns:
-  - name: id
+  - name: idd
     type: uuid
     primaryKey: true
     required: true
