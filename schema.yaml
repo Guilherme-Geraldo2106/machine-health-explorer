@@ -1,0 +1,244 @@
+metadata:
+  name: MyDatabase
+  version: 1.0.0
+  database: postgresql
+  author: Guilherme Geraldo
+  managerVersion: 16
+  msVersion: 1.0
+tables:
+- name: clientes
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: nome
+    type: text
+    required: true
+  - name: telefone
+    type: text
+  - name: email
+    type: text
+  - name: cpf
+    type: text
+- name: funcionarios
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: nome
+    type: text
+    required: true
+  - name: cargo
+    type: text
+    required: true
+  - name: telefone
+    type: text
+  - name: data_admissao
+    type: date
+    required: true
+- name: categorias_produtos
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: nome
+    type: text
+    required: true
+  - name: descricao
+    type: text
+- name: produtos
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: nome
+    type: text
+    required: true
+  - name: descricao
+    type: text
+  - name: preco
+    type: decimal
+    required: true
+  - name: estoque
+    type: integer
+    required: true
+  - name: categoria_produto_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: categorias_produtos.id
+- name: pedidos
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: cliente_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: clientes.id
+  - name: funcionario_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: funcionarios.id
+  - name: data_pedido
+    type: timestamp
+    required: true
+  - name: status
+    type: text
+    required: true
+  - name: total
+    type: decimal
+    required: true
+- name: pedido_itens
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: pedido_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: pedidos.id
+  - name: produto_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: produtos.id
+  - name: quantidade
+    type: integer
+    required: true
+  - name: preco_unitario
+    type: decimal
+    required: true
+- name: fornecedores
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: nome
+    type: text
+    required: true
+  - name: telefone
+    type: text
+  - name: email
+    type: text
+  - name: cnpj
+    type: text
+- name: compras
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: fornecedor_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: fornecedores.id
+  - name: funcionario_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: funcionarios.id
+  - name: data_compra
+    type: timestamp
+    required: true
+  - name: total
+    type: decimal
+    required: true
+- name: compra_itens
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: compra_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: compras.id
+  - name: produto_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: produtos.id
+  - name: quantidade
+    type: integer
+    required: true
+  - name: preco_unitario
+    type: decimal
+    required: true
+relationships:
+- name: fk_produtos_categoria
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: produtos.categoria_produto_id
+    to: categorias_produtos.id
+    constraintType: primary
+- name: fk_pedidos_cliente
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: pedidos.cliente_id
+    to: clientes.id
+    constraintType: primary
+- name: fk_pedidos_funcionario
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: pedidos.funcionario_id
+    to: funcionarios.id
+    constraintType: primary
+- name: fk_pedido_itens_pedido
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: pedido_itens.pedido_id
+    to: pedidos.id
+    constraintType: primary
+- name: fk_pedido_itens_produto
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: pedido_itens.produto_id
+    to: produtos.id
+    constraintType: primary
+- name: fk_compras_fornecedor
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: compras.fornecedor_id
+    to: fornecedores.id
+    constraintType: primary
+- name: fk_compras_funcionario
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: compras.funcionario_id
+    to: funcionarios.id
+    constraintType: primary
+- name: fk_compra_itens_compra
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: compra_itens.compra_id
+    to: compras.id
+    constraintType: primary
+- name: fk_compra_itens_produto
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: compra_itens.produto_id
+    to: produtos.id
+    constraintType: primary
+...
