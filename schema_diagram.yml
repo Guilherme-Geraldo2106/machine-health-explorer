@@ -7,20 +7,11 @@ layout:
       vendas:
         x: 450
         y: 323
-      Table_3:
-        x: 50
-        y: 383
-      Table_4:
-        x: 50
-        y: 583
-      Table_5:
-        x: 50
-        y: 783
     displayMode: physical
     edgeType: smoothstep
     viewport:
-      x: 712.9826767234665
-      y: 68.47699041792899
-      zoom: 0.5743491774985177
+      x: 682.9204288117974
+      y: 202.4506508565285
+      zoom: 0.5000000000000001
   perspectives: {}
   activePerspective: 
