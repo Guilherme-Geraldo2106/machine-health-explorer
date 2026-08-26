@@ -1,14 +1,23 @@
 layout:
   diagram:
     positions:
-      Table_1:
+      clientes:
         x: 50
         y: 50
+      vendas:
+        x: 450
+        y: 323
+      Table_3:
+        x: 50
+        y: 383
+      Table_4:
+        x: 50
+        y: 583
     displayMode: physical
     edgeType: smoothstep
     viewport:
-      x: 62
-      y: 83
-      zoom: 1
+      x: 693.7061729927068
+      y: -23.798699799336447
+      zoom: 0.7578582832551993
   perspectives: {}
   activePerspective: 

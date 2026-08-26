@@ -6,10 +6,67 @@ metadata:
   managerVersion: 16
   msVersion: 1.0
 tables:
-- name: Table_1
+- name: clientes
   columns:
-  - name: idd
+  - name: id
     type: uuid
     primaryKey: true
     required: true
+  - name: nome
+    type: text
+    required: true
+  - name: cpf
+    type: text
+    required: true
+  - name: telefone
+    type: text
+  - name: email
+    type: text
+  - name: data_nascimento
+    type: date
+- name: vendas
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+  - name: data_venda
+    type: datetime
+    required: true
+  - name: total
+    type: decimal
+    required: true
+  - name: farmacia_id
+    type: uuid
+    required: true
+    foreignKey:
+      references: farmacias.id
+  - name: cliente_id
+    type: uuid
+    foreignKey:
+      references: clientes.id
+  - name: medicamento_id
+    type: uuid
+    foreignKey:
+      references: medicamentos.id
+- name: Table_3
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+- name: Table_4
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
+relationships:
+- name: fk_vendas_cliente_id_clientes
+  type: non-identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: vendas.cliente_id
+    to: clientes.id
+    constraintType: primary
 ...
