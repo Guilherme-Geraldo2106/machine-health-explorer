@@ -12,6 +12,18 @@ tables:
     type: uuid
     primaryKey: true
     required: true
+  - name: id_1
+    type: uuid
+    primaryKey: true
+    required: true
+    foreignKey:
+      references: Table_3.id
+  - name: id_2
+    type: uuid
+    primaryKey: true
+    required: true
+    foreignKey:
+      references: Table_3.id
   - name: nome
     type: text
     required: true
@@ -49,6 +61,12 @@ tables:
     type: uuid
     foreignKey:
       references: medicamentos.id
+- name: Table_3
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
 relationships:
 - name: fk_vendas_cliente_id_clientes
   type: non-identifying
@@ -57,4 +75,12 @@ relationships:
   - from: vendas.cliente_id
     to: clientes.id
     constraintType: primary
+- name: clientes_Table_3
+  type: identifying
+  cardinality: zero-or-many
+  mapping:
+  - from: clientes.id_2
+    to: Table_3.id
+    constraintType: primary
+    constraintName: primary_key
 ...
