@@ -67,6 +67,12 @@ tables:
     type: uuid
     primaryKey: true
     required: true
+- name: Table_4
+  columns:
+  - name: id
+    type: uuid
+    primaryKey: true
+    required: true
 relationships:
 - name: fk_vendas_cliente_id_clientes
   type: non-identifying
