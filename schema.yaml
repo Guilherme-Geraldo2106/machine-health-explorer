@@ -30,25 +30,11 @@ tables:
   - name: nome
     type: text
     required: true
-  - name: cargo
-    type: text
-    required: true
   - name: telefone
     type: text
   - name: data_admissao
     type: date
     required: true
-- name: categorias_produtos
-  columns:
-  - name: id
-    type: uuid
-    primaryKey: true
-    required: true
-  - name: nome
-    type: text
-    required: true
-  - name: descricao
-    type: text
 - name: produtos
   columns:
   - name: id
@@ -163,13 +149,6 @@ tables:
     type: decimal
     required: true
 relationships:
-- name: fk_produtos_categoria
-  type: non-identifying
-  cardinality: zero-or-many
-  mapping:
-  - from: produtos.categoria_produto_id
-    to: categorias_produtos.id
-    constraintType: primary
 - name: fk_pedidos_cliente
   type: non-identifying
   cardinality: zero-or-many
