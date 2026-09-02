@@ -15,10 +15,6 @@ tables:
   - name: nome
     type: text
     required: true
-  - name: telefone
-    type: text
-  - name: email
-    type: text
   - name: cpf
     type: text
 - name: funcionarios
@@ -63,11 +59,6 @@ tables:
     type: uuid
     primaryKey: true
     required: true
-  - name: cliente_id
-    type: uuid
-    required: true
-    foreignKey:
-      references: clientes.id
   - name: funcionario_id
     type: uuid
     required: true
@@ -149,13 +140,6 @@ tables:
     type: decimal
     required: true
 relationships:
-- name: fk_pedidos_cliente
-  type: non-identifying
-  cardinality: zero-or-many
-  mapping:
-  - from: pedidos.cliente_id
-    to: clientes.id
-    constraintType: primary
 - name: fk_pedidos_funcionario
   type: non-identifying
   cardinality: zero-or-many

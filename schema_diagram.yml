@@ -7,9 +7,6 @@ layout:
       funcionarios:
         x: 775
         y: 50
-      categorias_produtos:
-        x: 400
-        y: 78
       produtos:
         x: 395
         y: 405
@@ -28,8 +25,8 @@ layout:
     displayMode: physical
     edgeType: smoothstep
     viewport:
-      x: 443.091709065616
-      y: 68.56655570651384
+      x: 459.091709065616
+      y: 65.56655570651384
       zoom: 0.6597539553864471
   perspectives: {}
   activePerspective: 
