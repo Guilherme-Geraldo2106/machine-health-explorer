@@ -118,21 +118,6 @@ tables:
   - name: preco_unitario
     type: decimal
     required: true
-- name: fornecedores
-  columns:
-  - name: id
-    type: uuid
-    primaryKey: true
-    required: true
-  - name: nome
-    type: text
-    required: true
-  - name: telefone
-    type: text
-  - name: email
-    type: text
-  - name: cnpj
-    type: text
 - name: compras
   columns:
   - name: id
@@ -212,13 +197,6 @@ relationships:
   mapping:
   - from: pedido_itens.produto_id
     to: produtos.id
-    constraintType: primary
-- name: fk_compras_fornecedor
-  type: non-identifying
-  cardinality: zero-or-many
-  mapping:
-  - from: compras.fornecedor_id
-    to: fornecedores.id
     constraintType: primary
 - name: fk_compras_funcionario
   type: non-identifying

@@ -1,11 +1,35 @@
 layout:
   diagram:
-    positions: {}
+    positions:
+      clientes:
+        x: 50
+        y: 50
+      funcionarios:
+        x: 775
+        y: 50
+      categorias_produtos:
+        x: 400
+        y: 78
+      produtos:
+        x: 395
+        y: 405
+      pedidos:
+        x: 755
+        y: 405
+      pedido_itens:
+        x: 578
+        y: 788
+      compras:
+        x: 1125
+        y: 419
+      compra_itens:
+        x: 938
+        y: 788
     displayMode: physical
     edgeType: smoothstep
     viewport:
-      x: 664.8538192590792
-      y: 85.35253856705813
-      zoom: 0.37892914162759944
+      x: 443.091709065616
+      y: 68.56655570651384
+      zoom: 0.6597539553864471
   perspectives: {}
   activePerspective: 
