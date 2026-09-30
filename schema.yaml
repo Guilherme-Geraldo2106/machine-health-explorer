@@ -9,7 +9,7 @@ tables:
 - name: clientes
   columns:
   - name: id
-    type: uuid
+    type: uui
     primaryKey: true
     required: true
   - name: id_1
