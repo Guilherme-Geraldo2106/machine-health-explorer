@@ -19,7 +19,7 @@ tables:
     foreignKey:
       references: Table_3.id
   - name: id_2
-    type: uuid
+    type: uui
     primaryKey: true
     required: true
     foreignKey:
